@@ -134,7 +134,26 @@ curl -X POST http://localhost:8000/api/upload \
 
 Files land in `photos/uploads/` under a timestamped, sanitised name, are indexed
 immediately, and appear in the gallery on the next poll. Bad files are reported
-per-file without failing the batch. Bulk backfills are still faster through the
+per-file without failing the batch.
+
+### `upload.py` — push a whole folder
+
+`upload.py` walks a folder **recursively** and sends everything to that endpoint:
+
+```bash
+export FACESCAN_UPLOAD_TOKEN=...            # same token the server has
+python upload.py ./uploads                  # ./uploads and every subfolder
+python upload.py ./uploads --url https://photos.example.com
+python upload.py ./uploads --dry-run        # list what would be sent
+python upload.py ./uploads --force          # re-send everything
+```
+
+Re-running only sends what is new or changed — `.facescan-upload.json` in the
+folder records each file's mtime and size, and is checkpointed after every
+batch, so an interrupted run resumes where it stopped. Requests are batched by
+count (`--batch`, default 10) and by total bytes, network errors retry with
+backoff, and a file the server rejects is left unmarked so the next run retries
+it. Bulk backfills of photos already on the server are still faster through the
 CLI (`python -m facescan.ingest photos/ --workers 8`).
 
 ## Running the published image
