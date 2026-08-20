@@ -137,6 +137,24 @@ immediately, and appear in the gallery on the next poll. Bad files are reported
 per-file without failing the batch. Bulk backfills are still faster through the
 CLI (`python -m facescan.ingest photos/ --workers 8`).
 
+## Running the published image
+
+CI publishes `ghcr.io/binhotvn/facescan` (linux/amd64 + linux/arm64) on every
+push to `main` and on `v*` tags, and a `v*` tag also cuts a GitHub release.
+
+```bash
+curl -O https://raw.githubusercontent.com/binhotvn/facescan/main/docker-compose.yml
+curl -o .env https://raw.githubusercontent.com/binhotvn/facescan/main/.env.example
+docker compose up -d                     # :latest
+FACESCAN_TAG=1.0.0 docker compose up -d  # a specific release
+```
+
+To build from a checkout instead of pulling:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
 ## The face model in containers
 
 `docker build` runs `scripts/prefetch_model.py`, so buffalo_l (~300MB) is baked
