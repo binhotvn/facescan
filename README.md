@@ -106,7 +106,10 @@ Deployment shape for a real event:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/faces`) |
+| `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/medium/w/h`) |
+| `POST /api/upload` | Push event photos in (multipart `files`); each is indexed before the response. Requires `X-Upload-Token` |
+| `POST /api/download-zip` | Bundle a list of photo paths into one `.zip` |
+| `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid thumb, 1600px viewer copy, or the original |
 | `POST /api/search` | Upload a portrait, get matching photos with scores |
 | `POST /api/refresh` | Reload the index after an ingest run |
 | `GET /api/stats`, `GET /healthz` | Counts and liveness |
@@ -114,6 +117,25 @@ Deployment shape for a real event:
 The UI is Vietnamese and gallery-first: every indexed photo is shown on load,
 and uploading a portrait (or using the camera) filters the grid down to matches.
 Match strictness is server-side (`FACESCAN_THRESHOLD`), not a user-facing control.
+
+## Pushing photos in
+
+`POST /api/upload` is how photographers add photos during the event — no shell
+access needed. It is **disabled until `FACESCAN_UPLOAD_TOKEN` is set** (an open
+upload endpoint on a public event site is a free file drop):
+
+```bash
+export TOKEN=$(openssl rand -hex 24)   # put this in .env as FACESCAN_UPLOAD_TOKEN
+
+curl -X POST http://localhost:8000/api/upload \
+  -H "X-Upload-Token: $TOKEN" \
+  -F "files=@race-001.jpg" -F "files=@race-002.jpg"
+```
+
+Files land in `photos/uploads/` under a timestamped, sanitised name, are indexed
+immediately, and appear in the gallery on the next poll. Bad files are reported
+per-file without failing the batch. Bulk backfills are still faster through the
+CLI (`python -m facescan.ingest photos/ --workers 8`).
 
 ## The face model in containers
 

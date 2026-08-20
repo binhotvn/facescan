@@ -206,6 +206,107 @@ def test_download_flag_sets_attachment(client, photos_dir):
     assert "a.jpg" in r.headers["content-disposition"]
 
 
+# --- upload -----------------------------------------------------------------
+
+
+@pytest.fixture
+def upload_ready(monkeypatch, photos_dir):
+    """Enable uploads and stub the face pass (no model in CI)."""
+    monkeypatch.setattr(app_module, "UPLOAD_TOKEN", "s3cret")
+
+    def fake_process(path):
+        img = cv2.imread(path)
+        h, w = img.shape[:2]
+        return {
+            "path": path,
+            "width": w,
+            "height": h,
+            "faces": [{"bbox": [1, 2, 3, 4], "det_score": 0.9, "embedding": unit(21)}],
+        }
+
+    monkeypatch.setattr(app_module.ingest, "_process_one", fake_process)
+    return photos_dir / "uploads"
+
+
+def _upload(client, files, token="s3cret"):
+    headers = {"X-Upload-Token": token} if token else {}
+    return client.post("/api/upload", files=files, headers=headers)
+
+
+def test_upload_indexes_the_photo(client, upload_ready):
+    r = _upload(client, [("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))])
+
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["indexed"], body["faces"]) == (1, 1)
+    assert body["photos"][0]["ok"] is True
+    assert list(upload_ready.iterdir())  # written under photos/uploads
+
+    gallery = client.get("/api/photos").json()
+    assert gallery["total"] == 1
+    assert client.get("/api/stats").json()["faces"] == 1
+
+
+def test_upload_accepts_a_batch(client, upload_ready):
+    files = [("files", (f"p{i}.jpg", _jpeg_bytes(), "image/jpeg")) for i in range(3)]
+    assert _upload(client, files).json()["indexed"] == 3
+    assert client.get("/api/photos").json()["total"] == 3
+
+
+def test_upload_requires_the_token(client, upload_ready):
+    files = [("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))]
+    assert _upload(client, files, token=None).status_code == 401
+    assert _upload(client, files, token="wrong").status_code == 401
+    assert not upload_ready.exists()
+
+
+def test_upload_is_disabled_without_a_configured_token(client, monkeypatch):
+    monkeypatch.setattr(app_module, "UPLOAD_TOKEN", "")
+    r = _upload(client, [("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))], token="anything")
+    assert r.status_code == 503
+
+
+def test_upload_reports_unreadable_files_without_failing_the_batch(client, upload_ready):
+    files = [
+        ("files", ("good.jpg", _jpeg_bytes(), "image/jpeg")),
+        ("files", ("bad.jpg", b"not an image", "image/jpeg")),
+    ]
+    body = _upload(client, files).json()
+
+    assert body["indexed"] == 1
+    assert [p["ok"] for p in body["photos"]] == [True, False]
+
+
+def test_upload_rejects_oversized_files(client, upload_ready, monkeypatch):
+    monkeypatch.setattr(app_module, "MAX_PHOTO_BYTES", 10)
+    body = _upload(client, [("files", ("big.jpg", _jpeg_bytes(), "image/jpeg"))]).json()
+    assert body["indexed"] == 0
+    assert body["photos"][0]["error"]
+
+
+def test_upload_rejects_an_oversized_batch(client, upload_ready, monkeypatch):
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_BATCH", 2)
+    files = [("files", (f"p{i}.jpg", _jpeg_bytes(), "image/jpeg")) for i in range(3)]
+    assert _upload(client, files).status_code == 413
+
+
+def test_upload_neutralizes_hostile_filenames(client, upload_ready):
+    files = [("files", ("../../../etc/passwd.jpg", _jpeg_bytes(), "image/jpeg"))]
+    body = _upload(client, files).json()
+
+    assert body["indexed"] == 1
+    written = list(upload_ready.iterdir())
+    assert len(written) == 1
+    assert ".." not in written[0].name
+    assert written[0].parent == upload_ready  # never escaped the uploads folder
+
+
+def test_upload_names_do_not_collide(client, upload_ready):
+    files = [("files", ("same.jpg", _jpeg_bytes(), "image/jpeg")) for _ in range(2)]
+    assert _upload(client, files).json()["indexed"] == 2
+    assert len(list(upload_ready.iterdir())) == 2
+
+
 def test_download_zip_bundles_the_photos(client, photos_dir):
     paths = []
     for name in ("a.jpg", "b.jpg"):

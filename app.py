@@ -6,17 +6,20 @@ import hashlib
 import io
 import logging
 import os
+import re
+import secrets
 import threading
 import urllib.parse
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from facescan import db
+from facescan import db, ingest
 from facescan.engine import detect_query_face
 from facescan.index import HAVE_FAISS, FaceIndex
 
@@ -29,6 +32,12 @@ MAX_UPLOAD_BYTES = int(os.environ.get("FACESCAN_MAX_UPLOAD_MB", "15")) * 1024 * 
 # Long-edge sizes: sm feeds the gallery grid, md the full-screen viewer. Serving
 # 5-10MB originals to phones on event wifi is what these exist to avoid.
 PHOTO_SIZES = {"sm": 480, "md": 1600}
+MAX_PHOTO_BYTES = int(os.environ.get("FACESCAN_MAX_PHOTO_MB", "40")) * 1024 * 1024
+MAX_UPLOAD_BATCH = int(os.environ.get("FACESCAN_MAX_UPLOAD_BATCH", "50"))
+# Uploading is off unless a token is configured: an open endpoint on a public
+# event site is a free file drop for anyone who finds it.
+UPLOAD_TOKEN = os.environ.get("FACESCAN_UPLOAD_TOKEN", "")
+UPLOAD_SUBDIR = os.environ.get("FACESCAN_UPLOAD_SUBDIR", "uploads")
 EVENT_NAME = os.environ.get("FACESCAN_EVENT_NAME", "Ảnh sự kiện FF Agency")
 EVENT_DATE = os.environ.get("FACESCAN_EVENT_DATE", "")
 MAX_ZIP_PHOTOS = 200
@@ -206,6 +215,75 @@ def photo(
         media_type="image/jpeg",
         filename=p.name if download else None,
     )
+
+
+def _require_upload_token(token: str | None):
+    if not UPLOAD_TOKEN:
+        raise HTTPException(503, "Tải ảnh lên chưa được bật trên máy chủ.")
+    if not token or not secrets.compare_digest(token, UPLOAD_TOKEN):
+        raise HTTPException(401, "Sai mã tải lên.")
+
+
+def _upload_name(original: str | None) -> str:
+    """A collision-free, path-safe filename that still hints at the original."""
+    stem = Path(original or "photo").name
+    stem = re.sub(r"[^A-Za-z0-9._-]", "-", stem)[-60:].lstrip(".-") or "photo"
+    if not stem.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+        stem += ".jpg"
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return f"{ts}-{secrets.token_hex(4)}-{stem}"
+
+
+@app.post("/api/upload")
+def api_upload(
+    files: list[UploadFile] = File(...),
+    x_upload_token: str | None = Header(default=None),
+):
+    """Photographers push event photos in; each one is indexed before returning.
+
+    Guarded by FACESCAN_UPLOAD_TOKEN — see _require_upload_token.
+    """
+    _require_upload_token(x_upload_token)
+    if not files:
+        raise HTTPException(400, "Không có ảnh nào.")
+    if len(files) > MAX_UPLOAD_BATCH:
+        raise HTTPException(413, f"Tối đa {MAX_UPLOAD_BATCH} ảnh mỗi lần.")
+
+    dest_dir = PHOTOS_DIR / UPLOAD_SUBDIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    conn = db.connect()
+    results, indexed, total_faces = [], 0, 0
+
+    try:
+        for f in files:
+            data = f.file.read(MAX_PHOTO_BYTES + 1)
+            if len(data) > MAX_PHOTO_BYTES:
+                results.append({"filename": f.filename, "ok": False, "error": "Ảnh quá lớn."})
+                continue
+            if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+                results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
+                continue
+
+            dest = dest_dir / _upload_name(f.filename)
+            dest.write_bytes(data)
+            with _infer_lock:  # the model is not thread-safe
+                result = ingest._process_one(str(dest))
+            if result is None:
+                dest.unlink(missing_ok=True)
+                results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
+                continue
+
+            faces = ingest._store(conn, result, dest.stat().st_mtime)
+            indexed += 1
+            total_faces += faces
+            results.append(
+                dict(_photo_urls(str(dest)), filename=f.filename, ok=True, faces=faces)
+            )
+    finally:
+        conn.close()
+
+    index.refresh(force=True)
+    return {"indexed": indexed, "faces": total_faces, "photos": results}
 
 
 @app.post("/api/download-zip")

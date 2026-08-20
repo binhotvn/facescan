@@ -98,16 +98,6 @@ body {
     margin-block-start: 2rem;
   }
 
-  &__loading {
-    display: flex;
-    justify-content: center;
-    margin-block-start: 2rem;
-    color: #fff;
-
-    .cds--inline-loading__text {
-      color: #fff;
-    }
-  }
 }
 
 .fa-cta {
@@ -137,6 +127,13 @@ body {
 
   &:active {
     transform: scale(0.98);
+  }
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: default;
+    transform: none;
+    box-shadow: none;
   }
 
   &.is-ghost {
@@ -269,6 +266,66 @@ body {
   font-weight: 600;
   cursor: pointer;
   animation: fa-rise var(--dur) var(--ease-out) both;
+}
+
+// --- loading ---------------------------------------------------------------
+.fa-loading {
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+  padding-block: 4rem;
+  color: #525252;
+}
+
+// Search runs the model, which takes a few seconds on CPU: say so, and stop
+// the interface pretending it is idle.
+.fa-searching {
+  position: fixed;
+  inset: 0;
+  z-index: 8500;
+  display: grid;
+  place-items: center;
+  background: rgba(22, 22, 22, 0.55);
+  backdrop-filter: blur(3px);
+  animation: fa-fade var(--dur) var(--ease-out) both;
+
+  &__card {
+    display: grid;
+    justify-items: center;
+    gap: 0.5rem;
+    min-inline-size: 17rem;
+    padding: 2rem 2.5rem;
+    text-align: center;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+    animation: fa-zoom var(--dur) var(--ease-out) both;
+
+    strong {
+      font-size: 1rem;
+    }
+
+    span:last-child {
+      font-size: 0.8125rem;
+      color: #6f6f6f;
+    }
+  }
+}
+
+.fa-spinner {
+  inline-size: 2.5rem;
+  block-size: 2.5rem;
+  margin-block-end: 0.5rem;
+  border: 3px solid $ff-red-soft;
+  border-block-start-color: $ff-red;
+  border-radius: 50%;
+  animation: fa-spin 900ms linear infinite;
+}
+
+@keyframes fa-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 // --- gallery ---------------------------------------------------------------
@@ -616,6 +673,7 @@ body {
   }
 
   .fa-facts__card,
+  .fa-searching__card,
   .fa-new,
   .fa-lightbox__img,
   .fa-camera__count {

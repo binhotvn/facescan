@@ -1,8 +1,43 @@
+# --- Python ---
 .venv/
+venv/
+env/
 __pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Node / frontend build ---
 node_modules/
 static/dist/
-*.pyc
+frontend/dist/
+npm-debug.log*
+yarn-error.log*
+.vite/
+
+# --- App data (event photos, face index, thumbnail cache) ---
 photos/
 data/
+*.db
+*.db-wal
+*.db-shm
+
+# --- Models (~300MB, downloaded on first run / baked into the image) ---
+.insightface/
+*.onnx
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Editors / OS ---
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,12 +1,28 @@
 services:
   facescan:
+    # Build locally, or swap for the image CI publishes:
+    #   image: ghcr.io/binhotvn/facescan:latest
     build: .
+    image: facescan:local
     ports:
       - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FACESCAN_PHOTOS: /app/photos
+      FACESCAN_THUMBS: /app/data/thumbs
+      FACESCAN_WARMUP: "1"
     volumes:
-      - ./photos:/app/photos        # your event photos
-      - ./data:/app/data            # face index (SQLite)
-      - insightface-models:/root/.insightface  # model cache (downloaded once)
+      - ./photos:/app/photos                   # event photos (also where uploads land)
+      - ./data:/app/data                       # face index + thumbnail cache
+      - insightface-models:/root/.insightface  # model cache; seeded from the image
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
 
 volumes:

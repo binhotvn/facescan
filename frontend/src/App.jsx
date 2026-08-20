@@ -80,22 +80,26 @@ export default function App() {
 
       <section className="fa-hero">
         <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
-        {searching ? (
-          <div className="fa-hero__loading">
-            <InlineLoading description="Đang tìm ảnh có bạn…" />
-          </div>
-        ) : (
-          <div className="fa-hero__actions">
-            <button type="button" className="fa-cta" onClick={() => setCameraOpen(true)}>
-              <Search size={20} />
-              Tìm ảnh của bạn
-            </button>
-            <button type="button" className="fa-cta is-ghost" onClick={() => fileRef.current?.click()}>
-              <ImageIcon size={20} />
-              Tải ảnh lên
-            </button>
-          </div>
-        )}
+        <div className="fa-hero__actions">
+          <button
+            type="button"
+            className="fa-cta"
+            disabled={searching}
+            onClick={() => setCameraOpen(true)}
+          >
+            <Search size={20} />
+            Tìm ảnh của bạn
+          </button>
+          <button
+            type="button"
+            className="fa-cta is-ghost"
+            disabled={searching}
+            onClick={() => fileRef.current?.click()}
+          >
+            <ImageIcon size={20} />
+            Tải ảnh lên
+          </button>
+        </div>
       </section>
 
       <div className="fa-facts">
@@ -180,7 +184,10 @@ export default function App() {
         </p>
 
         {loading ? (
-          <Loading description="Đang tải ảnh" withOverlay={false} />
+          <div className="fa-loading">
+            <Loading description="Đang tải ảnh" withOverlay={false} small />
+            <p>Đang tải ảnh sự kiện…</p>
+          </div>
         ) : shown.length === 0 && !matches ? (
           <div className="fa-empty">
             <ImageIcon size={32} />
@@ -215,6 +222,16 @@ export default function App() {
           Chụp ảnh tìm ảnh của bạn
         </button>
       </div>
+
+      {searching && (
+        <div className="fa-searching" role="status" aria-live="polite">
+          <div className="fa-searching__card">
+            <span className="fa-spinner" aria-hidden="true" />
+            <strong>Đang tìm ảnh có bạn…</strong>
+            <span>Quá trình này mất vài giây.</span>
+          </div>
+        </div>
+      )}
 
       <CameraModal
         open={cameraOpen}
