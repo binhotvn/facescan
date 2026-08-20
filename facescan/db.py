@@ -114,6 +114,14 @@ def load_index(conn):
     return embs, meta
 
 
+def pending_photos(conn):
+    """Photos accepted but never indexed (n_faces NULL): a restart resumes them."""
+    rows = conn.execute(
+        "SELECT path, sha256 FROM photos WHERE n_faces IS NULL ORDER BY id"
+    ).fetchall()
+    return [{"path": r[0], "sha256": r[1]} for r in rows]
+
+
 def list_photos(conn, limit: int = 120, offset: int = 0):
     """Newest-indexed first page of photos for the gallery view."""
     rows = conn.execute(

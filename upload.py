@@ -34,7 +34,9 @@ from pathlib import Path
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 STATE_NAME = ".facescan-upload.json"
-MAX_BATCH_BYTES = 64 * 1024 * 1024  # one request is built in memory
+# One request is built in memory, and proxies cap request bodies (Cloudflare's
+# free tier at 100MB). Keep a batch comfortably under that.
+MAX_BATCH_BYTES = 48 * 1024 * 1024
 WATCH_INTERVAL = 3.0
 SETTLE_SECONDS = 1.5  # a file still being copied in must stop growing first
 
@@ -585,7 +587,8 @@ def build_parser(env: dict | None = None):
     ap.add_argument("--interval", type=float, default=WATCH_INTERVAL,
                     help=f"seconds between watch scans (default: {WATCH_INTERVAL})")
     ap.add_argument("--workers", type=int, default=3, help="parallel uploads (default: 3)")
-    ap.add_argument("--batch", type=int, default=8, help="photos per request (default: 8)")
+    ap.add_argument("--batch", type=int, default=4,
+                    help="photos per request (default: 4; proxies cap body size)")
     ap.add_argument("--timeout", type=int, default=900, help="per-request timeout in seconds")
     ap.add_argument("--retries", type=int, default=2, help="retries per batch on network errors")
     ap.add_argument("--force", action="store_true", help="ignore local state and re-send")

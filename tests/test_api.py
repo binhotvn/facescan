@@ -326,6 +326,35 @@ def test_upload_accepts_a_batch(client, upload_ready):
     assert _indexed(client)["faces"] == 3
 
 
+def test_pending_work_survives_a_restart(client, upload_ready, db_path, monkeypatch):
+    """A restart mid-queue must not strand accepted photos unindexed."""
+    # the process dies before the worker ever starts
+    monkeypatch.setattr(app_module.indexer, "_ensure_running", lambda: None)
+    _upload(client, [("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))])
+
+    conn = db.connect(db_path)
+    assert len(db.pending_photos(conn)) == 1
+    conn.close()
+
+    fresh = app_module.Indexer()          # what startup builds
+    assert fresh.resume() == 1
+    fresh.q.join()
+    fresh.stop()
+
+    conn = db.connect(db_path)
+    assert db.pending_photos(conn) == []  # nothing left behind
+    assert db.stats(conn)["faces"] == 1
+    conn.close()
+
+
+def test_stats_reports_the_indexing_backlog(client, upload_ready):
+    _upload(client, [("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))])
+    _indexed(client)
+    body = client.get("/api/stats").json()
+    assert body["pending"] == 0
+    assert client.get("/healthz").json()["pending"] == 0
+
+
 def test_upload_skips_content_already_indexed(client, upload_ready):
     photo = ("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))
     assert _upload(client, [photo]).json()["accepted"] == 1

@@ -73,6 +73,7 @@ def _index_html() -> str:
 @app.on_event("startup")
 def _warmup():
     index.refresh(force=True)
+    indexer.resume()
     # Containers bake the model into the image (scripts/prefetch_model.py); loading
     # it at startup keeps the first search fast. Off by default for local dev/tests.
     if os.environ.get("FACESCAN_WARMUP", "0") == "1":
@@ -298,6 +299,22 @@ class Indexer:
             self._thread = threading.Thread(target=self._run, name="indexer", daemon=True)
             self._thread.start()
 
+    def resume(self):
+        """Re-queue anything accepted but not indexed before the last restart."""
+        conn = db.connect()
+        try:
+            rows = db.pending_photos(conn)
+        finally:
+            conn.close()
+        for row in rows:
+            path = Path(row["path"])
+            if path.is_file():
+                self.q.put((path, row["sha256"]))
+        if rows:
+            log.info("resuming %d photo(s) queued before restart", len(rows))
+            self._ensure_running()
+        return len(rows)
+
     def _run(self):
         conn = db.connect()
         try:
@@ -381,6 +398,9 @@ def api_upload(
             # Recorded now, with its hash, so a re-run is recognised as a
             # duplicate even before the background worker reaches it.
             db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
+            # n_faces NULL marks "accepted, not yet indexed", so a restart
+            # mid-queue can pick the work back up.
+            conn.execute("UPDATE photos SET n_faces = NULL WHERE path = ?", (str(dest),))
             conn.commit()
             indexer.submit(dest, digest)
             accepted += 1

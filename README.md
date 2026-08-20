@@ -203,6 +203,15 @@ are dropped into the folder, waiting until a file has stopped growing so a
 half-copied photo is never sent. The live view shows progress, throughput,
 counts and recent activity.
 
+**Proxy limits.** Requests now return as soon as the files are stored, so a
+gateway timeout during indexing is no longer possible. What is left is transfer
+time and body size, which your reverse proxy caps: Cloudflare's free tier allows
+100MB per request and 100s in total, nginx defaults to 1MB
+(`client_max_body_size`) and 60s (`proxy_read_timeout`). The client keeps a
+batch under 48MB, splits a batch in half on 502/504/408 and shrinks its batch
+size for the rest of the run, so it adapts without configuration. Drop
+`--batch 1` if a proxy is especially strict.
+
 **Speed.** Startup does not hash the folder: it filters on mtime and size, then
 hashes each batch inside the worker that uploads it, so transfers begin at once
 and hashing overlaps the network. Batches are capped by count (`--batch`) and by
