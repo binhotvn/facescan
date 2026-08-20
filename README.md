@@ -102,6 +102,19 @@ Deployment shape for a real event:
 - Ingest speed on CPU is roughly 1–3 photos/sec/worker at det_size 1024. The DB file is portable — you can ingest on a beefy machine and ship `data/facescan.db` to the web server.
 - Privacy: you're storing biometric embeddings of attendees — check consent/GDPR requirements for your event, and delete `data/` after the event if required.
 
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/faces`) |
+| `POST /api/search` | Upload a portrait, get matching photos with scores |
+| `POST /api/refresh` | Reload the index after an ingest run |
+| `GET /api/stats`, `GET /healthz` | Counts and liveness |
+
+The UI is Vietnamese and gallery-first: every indexed photo is shown on load,
+and uploading a portrait (or using the camera) filters the grid down to matches.
+Match strictness is server-side (`FACESCAN_THRESHOLD`), not a user-facing control.
+
 ## Tests & CI
 
 ```bash

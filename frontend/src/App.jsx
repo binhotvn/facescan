@@ -1,66 +1,80 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Theme,
   Header,
   HeaderName,
-  Grid,
-  Column,
-  FileUploaderDropContainer,
   Button,
-  Slider,
   Tag,
   Tile,
-  ClickableTile,
   InlineNotification,
   InlineLoading,
   Modal,
+  Loading,
 } from '@carbon/react';
-import { Camera, Search, FaceSatisfied } from '@carbon/icons-react';
+import { Camera, Image as ImageIcon, ArrowLeft } from '@carbon/icons-react';
+
+const PAGE_SIZE = 120;
 
 export default function App() {
   const [stats, setStats] = useState(null);
-  const [queryFile, setQueryFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [threshold, setThreshold] = useState(0.35);
+  const [gallery, setGallery] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
-  const [matches, setMatches] = useState(null);
+  const [matches, setMatches] = useState(null); // null = showing the whole gallery
   const [error, setError] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const fileRef = useRef(null);
 
-  useEffect(() => {
-    fetch('/api/stats')
-      .then((r) => r.json())
-      .then(setStats)
-      .catch(() => {});
+  const loadPage = useCallback(async (offset = 0) => {
+    const res = await fetch(`/api/photos?limit=${PAGE_SIZE}&offset=${offset}`);
+    const data = await res.json();
+    setTotal(data.total);
+    setGallery((prev) => (offset === 0 ? data.photos : [...prev, ...data.photos]));
   }, []);
 
   useEffect(() => {
-    return () => previewUrl && URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
+    Promise.all([
+      fetch('/api/stats').then((r) => r.json()).then(setStats),
+      loadPage(0),
+    ])
+      .catch(() => setError('Không tải được thư viện ảnh.'))
+      .finally(() => setLoading(false));
+  }, [loadPage]);
 
-  function setQuery(file) {
-    setQueryFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
-    setMatches(null);
+  async function runSearch(file) {
+    if (!file) return;
+    setSearching(true);
     setError(null);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('/api/search', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      setMatches(data.matches);
+    } catch (err) {
+      setError(err.message);
+      setMatches(null);
+    } finally {
+      setSearching(false);
+    }
   }
 
   async function openCamera() {
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
       streamRef.current = stream;
       setCameraOpen(true);
-      // video element mounts with the modal on next tick
       requestAnimationFrame(() => {
         if (videoRef.current) videoRef.current.srcObject = stream;
       });
     } catch (err) {
-      setError(`Camera error: ${err.message}`);
+      setError(`Không mở được máy ảnh: ${err.message}`);
     }
   }
 
@@ -79,168 +93,156 @@ export default function App() {
     canvas.getContext('2d').drawImage(video, 0, 0);
     canvas.toBlob(
       (blob) => {
-        setQuery(new File([blob], 'selfie.jpg', { type: 'image/jpeg' }));
         closeCamera();
+        runSearch(new File([blob], 'selfie.jpg', { type: 'image/jpeg' }));
       },
       'image/jpeg',
       0.92
     );
   }
 
-  async function search() {
-    if (!queryFile) return;
-    setSearching(true);
-    setError(null);
-    setMatches(null);
-    const form = new FormData();
-    form.append('file', queryFile);
-    try {
-      const res = await fetch(`/api/search?threshold=${threshold}`, {
-        method: 'POST',
-        body: form,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || res.statusText);
-      setMatches(data.matches);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSearching(false);
-    }
-  }
+  const photos = matches ?? gallery;
+  const showLoadMore = !matches && gallery.length < total;
 
   return (
     <Theme theme="g100">
-      <Header aria-label="FaceScan">
-        <HeaderName href="/" prefix="Face">
-          Scan
+      <Header aria-label="FF Agency">
+        <HeaderName href="/" prefix="FF">
+          Agency
         </HeaderName>
       </Header>
-      <main className="facescan-main">
-        <Grid>
-          <Column lg={16} md={8} sm={4} className="facescan-hero">
-            <h1>Find your race photos</h1>
-            <p style={{ marginTop: '0.5rem', color: 'var(--cds-text-secondary)' }}>
-              Upload a selfie or take a photo — we&apos;ll find every event picture you
-              appear in.
-              {stats && ` ${stats.photos} photos with ${stats.faces} faces indexed.`}
+
+      <main className="fa-main">
+        <div className="fa-bar">
+          <div className="fa-bar__text">
+            <h1>{matches ? `Tìm thấy ${matches.length} ảnh có bạn` : 'Ảnh sự kiện'}</h1>
+            <p>
+              {matches
+                ? 'Bấm vào ảnh để xem cỡ lớn hoặc tải về.'
+                : stats
+                  ? `${stats.photos} ảnh · ${stats.faces} khuôn mặt. Tải lên ảnh chân dung để tìm ảnh có bạn.`
+                  : 'Đang tải…'}
             </p>
-          </Column>
+          </div>
 
-          <Column lg={8} md={8} sm={4}>
-            <FileUploaderDropContainer
-              labelText="Drag and drop a selfie here or click to upload"
-              accept={['image/jpeg', 'image/png', 'image/webp']}
-              multiple={false}
-              onAddFiles={(evt, { addedFiles }) => {
-                if (addedFiles?.[0]) setQuery(addedFiles[0]);
-              }}
-            />
-            <div
-              style={{
-                display: 'flex',
-                gap: '1rem',
-                alignItems: 'center',
-                marginTop: '1rem',
-                flexWrap: 'wrap',
-              }}
-            >
-              <Button kind="tertiary" renderIcon={Camera} onClick={openCamera}>
-                Use camera
+          <div className="fa-bar__actions">
+            {searching ? (
+              <InlineLoading description="Đang tìm ảnh có bạn…" />
+            ) : matches ? (
+              <Button kind="tertiary" renderIcon={ArrowLeft} onClick={() => setMatches(null)}>
+                Xem tất cả ảnh
               </Button>
-              {previewUrl && (
-                <img className="facescan-preview" src={previewUrl} alt="Your selfie" />
-              )}
-            </div>
-          </Column>
-
-          <Column lg={8} md={8} sm={4}>
-            <Slider
-              labelText="Match strictness (higher = fewer, surer matches)"
-              min={0.25}
-              max={0.55}
-              step={0.01}
-              value={threshold}
-              onChange={({ value }) => setThreshold(value)}
-            />
-            <div style={{ marginTop: '1.5rem' }}>
-              {searching ? (
-                <InlineLoading description="Searching all event photos…" />
-              ) : (
-                <Button renderIcon={Search} disabled={!queryFile} onClick={search}>
-                  Find my photos
+            ) : (
+              <>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = '';
+                    runSearch(f);
+                  }}
+                />
+                <Button renderIcon={ImageIcon} onClick={() => fileRef.current?.click()}>
+                  Tải ảnh lên để tìm
                 </Button>
-              )}
-            </div>
-          </Column>
+                <Button kind="tertiary" renderIcon={Camera} onClick={openCamera}>
+                  Chụp ảnh
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
 
-          {error && (
-            <Column lg={16} md={8} sm={4}>
-              <InlineNotification
-                kind="error"
-                title="Search failed"
-                subtitle={error}
-                onCloseButtonClick={() => setError(null)}
-              />
-            </Column>
-          )}
+        {error && (
+          <InlineNotification
+            kind="error"
+            title="Đã xảy ra lỗi"
+            subtitle={error}
+            onCloseButtonClick={() => setError(null)}
+            lowContrast
+          />
+        )}
 
-          {matches && matches.length === 0 && (
-            <Column lg={16} md={8} sm={4}>
-              <InlineNotification
-                kind="info"
-                title="No matches"
-                subtitle="Try lowering the match strictness, or a clearer photo."
-                hideCloseButton
-              />
-            </Column>
-          )}
+        {matches && matches.length === 0 && (
+          <InlineNotification
+            kind="info"
+            title="Không tìm thấy ảnh nào"
+            subtitle="Hãy thử ảnh chân dung rõ mặt, chụp chính diện."
+            hideCloseButton
+            lowContrast
+          />
+        )}
 
-          {matches && matches.length > 0 && (
-            <>
-              <Column lg={16} md={8} sm={4}>
-                <h4 style={{ margin: '1rem 0' }}>
-                  <FaceSatisfied style={{ verticalAlign: '-0.2em' }} /> Found you in{' '}
-                  {matches.length} photo{matches.length > 1 ? 's' : ''}
-                </h4>
-              </Column>
-              {matches.map((m) => (
-                <Column key={m.url} lg={4} md={4} sm={2} style={{ marginBottom: '1rem' }}>
-                  <ClickableTile
-                    className="facescan-card"
-                    href={m.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <img
-                      className="facescan-result-img"
-                      src={m.thumb || m.url}
-                      loading="lazy"
-                      alt="Matched event photo"
-                    />
-                    <Tag className="facescan-score" type="green" size="sm">
-                      {Math.round(m.score * 100)}%
-                    </Tag>
-                  </ClickableTile>
-                </Column>
-              ))}
-            </>
-          )}
-        </Grid>
+        {loading ? (
+          <Loading description="Đang tải ảnh" withOverlay={false} />
+        ) : photos.length === 0 && !matches ? (
+          <Tile className="fa-empty">
+            <h4>Thư viện đang trống</h4>
+            <p>Thêm ảnh vào thư mục photos/ rồi chạy lệnh lập chỉ mục.</p>
+          </Tile>
+        ) : (
+          <div className="fa-gallery">
+            {photos.map((p) => (
+              <button
+                type="button"
+                key={p.url}
+                className="fa-cell"
+                onClick={() => setLightbox(p)}
+              >
+                <img src={p.thumb} loading="lazy" alt="Ảnh sự kiện" />
+                {p.score != null && (
+                  <Tag className="fa-cell__tag" type="green" size="sm">
+                    {Math.round(p.score * 100)}%
+                  </Tag>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {showLoadMore && (
+          <div className="fa-more">
+            <Button kind="ghost" onClick={() => loadPage(gallery.length)}>
+              Tải thêm ảnh ({gallery.length}/{total})
+            </Button>
+          </div>
+        )}
       </main>
 
       <Modal
         open={cameraOpen}
-        modalHeading="Take a selfie"
-        primaryButtonText="Take photo"
-        secondaryButtonText="Cancel"
+        modalHeading="Chụp ảnh chân dung"
+        primaryButtonText="Chụp"
+        secondaryButtonText="Huỷ"
         onRequestSubmit={capture}
         onRequestClose={closeCamera}
       >
-        {cameraOpen && (
-          <Tile>
-            <video className="facescan-video" ref={videoRef} autoPlay playsInline muted />
-          </Tile>
+        {cameraOpen && <video className="fa-video" ref={videoRef} autoPlay playsInline muted />}
+      </Modal>
+
+      <Modal
+        open={!!lightbox}
+        passiveModal
+        modalHeading="Ảnh sự kiện"
+        onRequestClose={() => setLightbox(null)}
+        size="lg"
+      >
+        {lightbox && (
+          <>
+            <img className="fa-full" src={lightbox.url} alt="Ảnh sự kiện cỡ lớn" />
+            <Button
+              className="fa-download"
+              kind="tertiary"
+              href={lightbox.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Mở ảnh gốc
+            </Button>
+          </>
         )}
       </Modal>
     </Theme>

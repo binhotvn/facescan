@@ -82,6 +82,15 @@ def load_index(conn):
     return embs, meta
 
 
+def list_photos(conn, limit: int = 120, offset: int = 0):
+    """Newest-indexed first page of photos for the gallery view."""
+    rows = conn.execute(
+        "SELECT path, n_faces FROM photos ORDER BY id DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [{"path": r[0], "n_faces": r[1]} for r in rows]
+
+
 def stats(conn):
     n_photos = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
     n_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]

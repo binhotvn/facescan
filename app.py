@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import threading
+import urllib.parse
 from pathlib import Path
 
 import cv2
@@ -25,7 +26,7 @@ DEFAULT_THRESHOLD = float(os.environ.get("FACESCAN_THRESHOLD", "0.35"))
 MAX_UPLOAD_BYTES = int(os.environ.get("FACESCAN_MAX_UPLOAD_MB", "15")) * 1024 * 1024
 THUMB_SIZE = 480
 
-app = FastAPI(title="FaceScan")
+app = FastAPI(title="FF Agency — FaceScan")
 index = FaceIndex()
 # InsightFace sessions are not thread-safe; serialize inference across requests
 _infer_lock = threading.Lock()
@@ -67,6 +68,29 @@ def api_stats():
     return s
 
 
+def _photo_urls(path: str) -> dict:
+    q = urllib.parse.quote(path)
+    return {"url": f"/photo?path={q}", "thumb": f"/photo?path={q}&thumb=1"}
+
+
+@app.get("/api/photos")
+def api_photos(
+    limit: int = Query(120, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """The whole gallery, newest first — what the app shows before any search."""
+    conn = db.connect()
+    rows = db.list_photos(conn, limit, offset)
+    total = db.stats(conn)["photos"]
+    conn.close()
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "photos": [dict(_photo_urls(r["path"]), faces=r["n_faces"]) for r in rows],
+    }
+
+
 @app.post("/api/refresh")
 def api_refresh():
     """Reload the index after a new ingest run (also happens automatically)."""
@@ -93,12 +117,11 @@ def api_search(
     results = index.search(face.normed_embedding, threshold)
     return {
         "matches": [
-            {
-                "url": f"/photo?path={r['path']}",
-                "thumb": f"/photo?path={r['path']}&thumb=1",
-                "score": round(r["score"], 3),
-                "bbox": [round(v, 1) for v in r["bbox"]],
-            }
+            dict(
+                _photo_urls(r["path"]),
+                score=round(r["score"], 3),
+                bbox=[round(v, 1) for v in r["bbox"]],
+            )
             for r in results
         ]
     }

@@ -60,6 +60,38 @@ def test_stats(client, db_path):
     assert client.get("/api/stats").json() == {"photos": 1, "faces": 1}
 
 
+def test_photos_lists_the_gallery(client, db_path, photos_dir):
+    for name in ("a.jpg", "b.jpg"):
+        (photos_dir / name).write_bytes(_jpeg_bytes())
+        _seed_face(db_path, str(photos_dir / name), unit(9))
+
+    body = client.get("/api/photos").json()
+
+    assert body["total"] == 2
+    assert len(body["photos"]) == 2
+    assert all(p["faces"] == 1 for p in body["photos"])
+    assert all(p["thumb"].endswith("&thumb=1") for p in body["photos"])
+
+
+def test_photos_paginates(client, db_path, photos_dir):
+    for i in range(3):
+        _seed_face(db_path, str(photos_dir / f"p{i}.jpg"), unit(10 + i))
+
+    page = client.get("/api/photos", params={"limit": 2, "offset": 0}).json()
+    rest = client.get("/api/photos", params={"limit": 2, "offset": 2}).json()
+
+    assert page["total"] == 3
+    assert len(page["photos"]) == 2
+    assert len(rest["photos"]) == 1
+    assert {p["url"] for p in page["photos"]}.isdisjoint({p["url"] for p in rest["photos"]})
+
+
+def test_photo_urls_are_percent_encoded(client, db_path, photos_dir):
+    _seed_face(db_path, str(photos_dir / "ch\u1ea1y b\u1ed9.jpg"), unit(13))
+    url = client.get("/api/photos").json()["photos"][0]["url"]
+    assert " " not in url and "%20" in url
+
+
 def test_refresh_reloads_index(client, db_path):
     assert client.post("/api/refresh").json() == {"faces_indexed": 0}
     _seed_face(db_path, "a.jpg", unit(2))
