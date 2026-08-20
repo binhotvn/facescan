@@ -87,6 +87,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Model is baked into the image
+        # The build runs scripts/prefetch_model.py, so the ~300MB buffalo_l
+        # download happens here (cached by buildx) and never at request time.
+        run: |
+          docker run --rm facescan:ci \
+            python -c "import pathlib,sys; d=pathlib.Path('/root/.insightface/models'); \
+            f=list(d.rglob('*.onnx')); print(*[p.name for p in f], sep='\n'); sys.exit(0 if f else 1)"
+
       - name: Smoke test the container
         run: |
           docker run -d --name facescan -p 8000:8000 facescan:ci

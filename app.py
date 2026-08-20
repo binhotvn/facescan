@@ -48,6 +48,15 @@ def _index_html() -> str:
 @app.on_event("startup")
 def _warmup():
     index.refresh(force=True)
+    # Containers bake the model into the image (scripts/prefetch_model.py); loading
+    # it at startup keeps the first search fast. Off by default for local dev/tests.
+    if os.environ.get("FACESCAN_WARMUP", "0") == "1":
+        try:
+            from facescan.engine import get_engine
+            get_engine()
+            logging.getLogger("facescan").info("face model loaded")
+        except Exception as e:  # noqa: BLE001 - never block startup on the model
+            logging.getLogger("facescan").warning("model warmup failed: %s", e)
 
 
 @app.get("/", response_class=HTMLResponse)

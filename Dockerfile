@@ -18,12 +18,20 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt faiss-cpu
 
+# Bake the face model into the image so containers start search-ready
+# (no ~300MB download on the first request). Override with --build-arg.
+ARG FACESCAN_MODEL=buffalo_l
+ENV FACESCAN_MODEL=${FACESCAN_MODEL}
 COPY facescan/ facescan/
+COPY scripts/ scripts/
+RUN python scripts/prefetch_model.py
+
 COPY static/ static/
 COPY app.py .
 COPY --from=frontend /static/dist static/dist
 
-ENV FACESCAN_PHOTOS=/app/photos
+ENV FACESCAN_PHOTOS=/app/photos \
+    FACESCAN_WARMUP=1
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"

@@ -115,6 +115,16 @@ The UI is Vietnamese and gallery-first: every indexed photo is shown on load,
 and uploading a portrait (or using the camera) filters the grid down to matches.
 Match strictness is server-side (`FACESCAN_THRESHOLD`), not a user-facing control.
 
+## The face model in containers
+
+`docker build` runs `scripts/prefetch_model.py`, so buffalo_l (~300MB) is baked
+into the image and containers start search-ready — no multi-minute stall for the
+first person to search. `FACESCAN_WARMUP=1` (set in the Dockerfile) loads it at
+startup too. Pick a different model with `--build-arg FACESCAN_MODEL=buffalo_s`.
+
+`docker-compose.yml` mounts a named volume at `/root/.insightface`; Docker seeds
+an empty named volume from the image, so the baked model survives the mount.
+
 ## Tests & CI
 
 ```bash
@@ -131,7 +141,7 @@ GitHub Actions (`.github/workflows/`):
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, PRs | ruff + pytest on Python 3.11/3.12, `npm ci && npm run build` for the Carbon frontend, Docker image build plus a `/healthz` container smoke test |
+| `ci.yml` | push to `main`, PRs | ruff + pytest on Python 3.11/3.12, `npm ci && npm run build` for the Carbon frontend, Docker image build (downloads the model once, then reuses the buildx GHA cache), a check that the `.onnx` weights are baked in, and a `/healthz` container smoke test |
 | `docker-publish.yml` | push to `main`, `v*` tags | builds and pushes `ghcr.io/<owner>/<repo>` (`latest`, branch, `vX.Y.Z`, short-sha tags) using the repo's `GITHUB_TOKEN` |
 
 Dependabot keeps pip, npm, Docker, and action versions current (`.github/dependabot.yml`).
