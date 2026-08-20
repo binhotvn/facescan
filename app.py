@@ -30,7 +30,18 @@ index = FaceIndex()
 # InsightFace sessions are not thread-safe; serialize inference across requests
 _infer_lock = threading.Lock()
 
-INDEX_HTML = (Path(__file__).parent / "static" / "index.html").read_text()
+# Serve the built Carbon/React frontend (frontend/ -> static/dist);
+# fall back to the plain static page if it hasn't been built.
+_STATIC = Path(__file__).parent / "static"
+_DIST = _STATIC / "dist"
+
+
+def _index_html() -> str:
+    # read per request (it's <1KB): asset hashes change on every frontend build
+    page = _DIST / "index.html"
+    if not page.is_file():
+        page = _STATIC / "index.html"
+    return page.read_text()
 
 
 @app.on_event("startup")
@@ -40,7 +51,7 @@ def _warmup():
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return INDEX_HTML
+    return _index_html()
 
 
 @app.get("/healthz")
@@ -118,3 +129,8 @@ def photo(path: str, thumb: bool = False):
         THUMBS_DIR.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(tp), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return FileResponse(tp, media_type="image/jpeg")
+
+
+if (_DIST / "assets").is_dir():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")

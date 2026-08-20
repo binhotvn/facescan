@@ -7,11 +7,16 @@ Find yourself in event photos. Built for marathons and similar events:
 
 No cloud APIs — everything runs locally (CPU is fine).
 
+The web UI is a Vite + React app built with IBM's Carbon Design System (`@carbon/react`, g100 theme), served as static files by the FastAPI backend.
+
 ## Quick start (local)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
+# build the Carbon/React frontend (once, and after frontend changes)
+cd frontend && npm install && npm run build && cd ..
 
 # 1. Put event photos in ./photos (any nested structure, jpg/png/webp)
 # 2. Index them (first run downloads the model, ~300MB)
@@ -71,8 +76,10 @@ facescan/
   engine.py    InsightFace wrapper + cosine search
   ingest.py    CLI: index a folder of event photos
   search.py    CLI: query with a selfie
-app.py         FastAPI web app (upload/camera → matches)
-static/index.html  single-page UI
+app.py         FastAPI backend (search API + serves the built frontend)
+frontend/      Vite + React + Carbon Design System UI (npm run build -> static/dist)
+frontend/      (dev mode: `npm run dev` proxies /api to the backend on :8000)
+static/index.html  no-build fallback page (used if static/dist is absent)
 photos/        your event photos (gitignored)
 data/          SQLite index (gitignored)
 ```

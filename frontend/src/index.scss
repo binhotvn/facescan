@@ -1,0 +1,57 @@
+@use '@carbon/react' with (
+  $use-akamai-cdn: true
+);
+
+html,
+body {
+  background: #161616; // Carbon g100 $background
+}
+
+#root {
+  min-block-size: 100vh;
+}
+
+.facescan-main {
+  min-block-size: calc(100vh - 3rem);
+}
+
+.facescan-main {
+  padding-block-start: 3rem;
+  padding-block-end: 4rem;
+}
+
+.facescan-hero {
+  margin-block-end: 2rem;
+}
+
+.facescan-preview {
+  max-block-size: 8.5rem;
+  border-radius: 4px;
+  display: block;
+}
+
+.facescan-video {
+  inline-size: 100%;
+  max-inline-size: 30rem;
+  border-radius: 4px;
+}
+
+.facescan-result-img {
+  inline-size: 100%;
+  block-size: 13rem;
+  object-fit: cover;
+  display: block;
+}
+
+.facescan-card {
+  position: relative;
+  padding: 0;
+  overflow: hidden;
+  min-block-size: 0;
+}
+
+.facescan-score {
+  position: absolute;
+  inset-block-start: 0.5rem;
+  inset-inline-end: 0.5rem;
+}

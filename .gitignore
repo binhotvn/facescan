@@ -1,5 +1,7 @@
 .venv/
 __pycache__/
+node_modules/
+static/dist/
 *.pyc
 photos/
 data/
