@@ -16,7 +16,6 @@ import hashlib
 import json
 import mimetypes
 import os
-import queue
 import shutil
 import sys
 import threading
@@ -224,6 +223,9 @@ class PlainUI:
     def log(self, msg: str, level: str = "info"):
         stream = sys.stderr if level == "error" else sys.stdout
         print(("  ! " if level == "error" else "  ") + msg, file=stream, flush=True)
+
+    def set_status(self, status: str):
+        pass
 
     def refresh(self):
         pass
@@ -437,7 +439,6 @@ def settled(p: Path, now: float) -> bool:
 
 def watch(args, state: State, stats: Stats, ui, uploader: Uploader):
     """Keep scanning the folder and upload whatever appears."""
-    pending: queue.Queue = queue.Queue()
     while True:
         now = time.time()
         fresh = [p for p in iter_images(args.folder)
@@ -449,9 +450,6 @@ def watch(args, state: State, stats: Stats, ui, uploader: Uploader):
         ui.set_status(f"idle, watching {args.folder}")
         ui.refresh()
         time.sleep(args.interval)
-        if not pending.empty():  # pragma: no cover - reserved for signal handling
-            break
-    return True
 
 
 # --------------------------------------------------------------------------
@@ -511,14 +509,12 @@ def main(argv=None) -> int:
     ok = True
     with ui:
         try:
-            if hasattr(ui, "set_status"):
-                ui.set_status("scanning")
+            ui.set_status("scanning")
             ok = uploader.run(list(iter_images(args.folder)))
             if ok and args.watch:
-                ok = watch(args, state, stats, ui, uploader)
+                watch(args, state, stats, ui, uploader)
         except KeyboardInterrupt:
-            if hasattr(ui, "set_status"):
-                ui.set_status("stopped")
+            ui.set_status("stopped")
         finally:
             state.save()
 
