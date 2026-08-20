@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FaceScan — Find your race photos</title>
+<style>
+  :root { --accent: #e8590c; --bg: #101214; --card: #1a1d21; --text: #e9ecef; --muted: #868e96; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); min-height: 100vh; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h1 span { color: var(--accent); }
+  p.sub { color: var(--muted); margin-top: 0; }
+  .panel { background: var(--card); border-radius: 12px; padding: 1.25rem; margin: 1rem 0; }
+  .drop { border: 2px dashed #343a40; border-radius: 12px; padding: 2.5rem 1rem;
+          text-align: center; cursor: pointer; transition: border-color .15s; }
+  .drop:hover, .drop.over { border-color: var(--accent); }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin-top: 1rem; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+           padding: .6rem 1.1rem; font-size: 1rem; cursor: pointer; }
+  button.ghost { background: #343a40; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=range] { accent-color: var(--accent); }
+  #preview { max-height: 140px; border-radius: 8px; display: none; }
+  video { width: 100%; max-width: 420px; border-radius: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .75rem; }
+  .card { position: relative; border-radius: 10px; overflow: hidden; background: #000; }
+  .card img { width: 100%; height: 200px; object-fit: cover; display: block; }
+  .card .score { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.7);
+                 padding: 2px 8px; border-radius: 999px; font-size: .75rem; }
+  .status { color: var(--muted); }
+  .error { color: #ff6b6b; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Face<span>Scan</span></h1>
+  <p class="sub">Upload a selfie or take a photo — we'll find every event picture you appear in.
+     <span id="stats"></span></p>
+
+  <div class="panel">
+    <div class="drop" id="drop">
+      <input type="file" id="file" accept="image/*" hidden>
+      <div>📷 Drop a selfie here, or click to choose a file</div>
+    </div>
+    <div class="row">
+      <button class="ghost" id="camBtn">Use camera</button>
+      <img id="preview" alt="preview">
+      <label style="margin-left:auto; font-size:.85rem; color:var(--muted)">
+        Match strictness
+        <input type="range" id="thresh" min="0.25" max="0.55" step="0.01" value="0.35">
+        <span id="threshVal">0.35</span>
+      </label>
+      <button id="searchBtn" disabled>Find my photos</button>
+    </div>
+    <div id="camPanel" style="display:none; margin-top:1rem">
+      <video id="video" autoplay playsinline></video>
+      <div class="row">
+        <button id="snapBtn">Take photo</button>
+        <button class="ghost" id="camOff">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="msg" class="status"></div>
+  <div class="grid" id="results"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let queryBlob = null, stream = null;
+
+fetch('/api/stats').then(r => r.json())
+  .then(s => $('stats').textContent = `(${s.photos} photos, ${s.faces} faces indexed)`);
+
+$('thresh').oninput = e => $('threshVal').textContent = e.target.value;
+
+function setQuery(blob) {
+  queryBlob = blob;
+  $('preview').src = URL.createObjectURL(blob);
+  $('preview').style.display = 'inline-block';
+  $('searchBtn').disabled = false;
+}
+
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && setQuery(e.target.files[0]);
+$('drop').ondragover = e => { e.preventDefault(); $('drop').classList.add('over'); };
+$('drop').ondragleave = () => $('drop').classList.remove('over');
+$('drop').ondrop = e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+  if (e.dataTransfer.files[0]) setQuery(e.dataTransfer.files[0]);
+};
+
+$('camBtn').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+    $('video').srcObject = stream;
+    $('camPanel').style.display = 'block';
+  } catch (err) { $('msg').innerHTML = `<span class="error">Camera error: ${err.message}</span>`; }
+};
+function stopCam() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; $('camPanel').style.display = 'none';
+}
+$('camOff').onclick = stopCam;
+$('snapBtn').onclick = () => {
+  const v = $('video'), c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  c.toBlob(b => { setQuery(b); stopCam(); }, 'image/jpeg', 0.92);
+};
+
+$('searchBtn').onclick = async () => {
+  if (!queryBlob) return;
+  $('searchBtn').disabled = true;
+  $('msg').textContent = 'Searching…';
+  $('results').innerHTML = '';
+  const fd = new FormData();
+  fd.append('file', queryBlob, 'query.jpg');
+  try {
+    const res = await fetch(`/api/search?threshold=${$('thresh').value}`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    if (!data.matches.length) {
+      $('msg').textContent = 'No matches found. Try lowering the strictness slider.';
+    } else {
+      $('msg').textContent = `Found you in ${data.matches.length} photo${data.matches.length > 1 ? 's' : ''}:`;
+      $('results').innerHTML = data.matches.map(m =>
+        `<a class="card" href="${m.url}" target="_blank">
+           <img src="${m.url}" loading="lazy">
+           <span class="score">${Math.round(m.score * 100)}%</span>
+         </a>`).join('');
+    }
+  } catch (err) {
+    $('msg').innerHTML = `<span class="error">${err.message}</span>`;
+  } finally {
+    $('searchBtn').disabled = false;
+  }
+};
+</script>
+</body>
+</html>

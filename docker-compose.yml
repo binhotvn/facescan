@@ -1,0 +1,13 @@
+services:
+  facescan:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./photos:/app/photos        # your event photos
+      - ./data:/app/data            # face index (SQLite)
+      - insightface-models:/root/.insightface  # model cache (downloaded once)
+    restart: unless-stopped
+
+volumes:
+  insightface-models:
