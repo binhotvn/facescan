@@ -1,59 +1,63 @@
 #!/usr/bin/env python3
 """Push a folder of event photos to a running FaceScan server.
 
-    python upload.py ./uploads                       # everything under ./uploads, recursively
-    python upload.py ./uploads --url https://photos.example.com
-    python upload.py ./uploads --force               # re-send files already sent
+    python upload.py ./uploads                # send everything under ./uploads
+    python upload.py ./uploads --watch        # keep running, send new drops
+    python upload.py ./uploads --workers 4    # parallel uploads
 
-The server indexes each photo as it arrives (POST /api/upload), so photos show
-up in the gallery within seconds. Re-running only sends what is new or changed:
-a small state file next to the folder remembers what went up.
+Photos are matched by content, not by name: a file already sent is never sent
+again, and the server refuses content it has already indexed. Re-running after
+an interrupted session picks up exactly where it stopped.
 
-Token: --token, or $FACESCAN_UPLOAD_TOKEN. The server rejects uploads without it.
+Token: --token, or $FACESCAN_UPLOAD_TOKEN.
 """
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
+import queue
+import shutil
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 STATE_NAME = ".facescan-upload.json"
-# One request is built in memory, so cap a batch by bytes as well as by count.
-MAX_BATCH_BYTES = 64 * 1024 * 1024
+MAX_BATCH_BYTES = 64 * 1024 * 1024  # one request is built in memory
+WATCH_INTERVAL = 3.0
+SETTLE_SECONDS = 1.5  # a file still being copied in must stop growing first
 
 
+# --------------------------------------------------------------------------
+# files
+# --------------------------------------------------------------------------
 def iter_images(root: Path):
-    """Every image under root, recursively, in a stable order."""
     for p in sorted(root.rglob("*")):
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS and not p.name.startswith("."):
             yield p
 
 
-def load_state(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_state(path: Path, state: dict):
-    path.write_text(json.dumps(state, indent=1, sort_keys=True))
-
-
-def key_of(p: Path) -> str:
-    """Identity of a file for resume purposes: edited or replaced -> re-sent."""
+def file_key(p: Path) -> str:
     st = p.stat()
     return f"{st.st_mtime:.0f}:{st.st_size}"
 
 
+def file_hash(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def batches(paths, max_count: int, max_bytes: int = MAX_BATCH_BYTES):
-    """Group files so one request stays small enough to hold in memory."""
     batch, size = [], 0
     for p in paths:
         n = p.stat().st_size
@@ -66,8 +70,69 @@ def batches(paths, max_count: int, max_bytes: int = MAX_BATCH_BYTES):
         yield batch
 
 
+# --------------------------------------------------------------------------
+# state: what has already gone up
+# --------------------------------------------------------------------------
+class State:
+    """Remembers uploads by content hash, with a path cache to avoid rehashing.
+
+    Hashing every file on every run would read the whole folder from disk. The
+    path cache skips files whose mtime and size are unchanged; the hash set is
+    what actually decides, so a renamed or copied photo is still recognised.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        raw = self._read()
+        self.hashes: dict[str, str] = raw.get("hashes", {})   # hash -> first path seen
+        self.paths: dict[str, str] = raw.get("paths", {})     # path -> "key:hash"
+        self._lock = threading.Lock()
+        self._dirty = False
+
+    def _read(self) -> dict:
+        try:
+            return json.loads(self.path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def known_hash(self, p: Path) -> str | None:
+        """Cached hash for an unchanged file, else None (caller must hash)."""
+        entry = self.paths.get(str(p.resolve()))
+        if not entry:
+            return None
+        key, _, digest = entry.partition("|")
+        return digest if key == file_key(p) else None
+
+    def seen(self, digest: str) -> bool:
+        return digest in self.hashes
+
+    def mark(self, p: Path, digest: str):
+        with self._lock:
+            self.hashes.setdefault(digest, str(p.resolve()))
+            self.paths[str(p.resolve())] = f"{file_key(p)}|{digest}"
+            self._dirty = True
+
+    def note_path(self, p: Path, digest: str):
+        """Record a path->hash mapping without claiming the content was sent."""
+        with self._lock:
+            self.paths[str(p.resolve())] = f"{file_key(p)}|{digest}"
+            self._dirty = True
+
+    def save(self):
+        with self._lock:
+            if not self._dirty:
+                return
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"hashes": self.hashes, "paths": self.paths},
+                                      indent=1, sort_keys=True))
+            tmp.replace(self.path)  # atomic: a Ctrl-C never leaves half a file
+            self._dirty = False
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
 def multipart(files, field: str = "files"):
-    """Encode files as multipart/form-data. Returns (content_type, body)."""
     boundary = uuid.uuid4().hex
     body = bytearray()
     for p in files:
@@ -83,7 +148,7 @@ def multipart(files, field: str = "files"):
     return f"multipart/form-data; boundary={boundary}", bytes(body)
 
 
-def post_batch(url: str, token: str, files, timeout: int = 600) -> dict:
+def post_batch(url: str, token: str, files, timeout: int = 900) -> dict:
     ctype, body = multipart(files)
     req = urllib.request.Request(
         url.rstrip("/") + "/api/upload",
@@ -95,20 +160,304 @@ def post_batch(url: str, token: str, files, timeout: int = 600) -> dict:
         return json.load(r)
 
 
+class Fatal(Exception):
+    """Server said something a retry will not fix."""
+
+
 def explain(err: urllib.error.HTTPError) -> str:
     if err.code == 401:
         return "Sai mã tải lên (401). Check --token / $FACESCAN_UPLOAD_TOKEN."
     if err.code == 503:
-        return "Server has uploads disabled (503). Set FACESCAN_UPLOAD_TOKEN there and restart."
+        return "Server has uploads disabled (503). Set FACESCAN_UPLOAD_TOKEN there."
     if err.code == 413:
         return "Batch too large (413). Try a smaller --batch."
     try:
         return f"HTTP {err.code}: {json.load(err).get('detail', '')}"
-    except Exception:  # noqa: BLE001 - error body is not always JSON
+    except Exception:  # noqa: BLE001 - the error body is not always JSON
         return f"HTTP {err.code}"
 
 
-def main(argv=None) -> int:
+# --------------------------------------------------------------------------
+# stats
+# --------------------------------------------------------------------------
+@dataclass
+class Stats:
+    queued: int = 0
+    uploaded: int = 0
+    duplicates: int = 0
+    skipped: int = 0
+    failed: int = 0
+    faces: int = 0
+    bytes_sent: int = 0
+    started: float = field(default_factory=time.monotonic)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, **kw):
+        with self._lock:
+            for k, v in kw.items():
+                setattr(self, k, getattr(self, k) + v)
+
+    @property
+    def done(self) -> int:
+        return self.uploaded + self.duplicates + self.failed
+
+    @property
+    def rate(self) -> float:
+        elapsed = time.monotonic() - self.started
+        return self.done / elapsed if elapsed > 0.5 else 0.0
+
+    @property
+    def mb(self) -> float:
+        return self.bytes_sent / 1e6
+
+
+# --------------------------------------------------------------------------
+# terminal UI
+# --------------------------------------------------------------------------
+class PlainUI:
+    """Line-by-line output: pipes, CI logs, and terminals without ANSI."""
+
+    def __init__(self, stats: Stats, title: str):
+        self.stats = stats
+        print(title)
+
+    def log(self, msg: str, level: str = "info"):
+        stream = sys.stderr if level == "error" else sys.stdout
+        print(("  ! " if level == "error" else "  ") + msg, file=stream, flush=True)
+
+    def refresh(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        s = self.stats
+        print(f"\n{s.uploaded} uploaded, {s.faces} faces, {s.duplicates} duplicates, "
+              f"{s.skipped} skipped, {s.failed} failed ({s.mb:.0f}MB)")
+
+
+class LiveUI:
+    """A small live dashboard: progress bar, counters, and a recent-events tail.
+
+    Hand-rolled ANSI rather than a dependency: the script has to run wherever
+    the photographer's laptop is, without a pip install first.
+    """
+
+    BAR_WIDTH = 34
+    TAIL = 8
+
+    def __init__(self, stats: Stats, title: str, watching: bool = False):
+        self.stats = stats
+        self.title = title
+        self.watching = watching
+        self.events: list[tuple[str, str]] = []
+        self.status = "starting"
+        self._lock = threading.Lock()
+        self._lines = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    # -- lifecycle
+    def __enter__(self):
+        sys.stdout.write("\x1b[?25l")  # hide cursor
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=1)
+        self._draw(final=True)
+        sys.stdout.write("\x1b[?25h\n")  # show cursor
+        sys.stdout.flush()
+
+    def _loop(self):
+        while not self._stop.wait(0.2):
+            self._draw()
+
+    # -- input
+    def log(self, msg: str, level: str = "info"):
+        with self._lock:
+            self.events.append((level, msg))
+            del self.events[:-self.TAIL]
+
+    def set_status(self, status: str):
+        self.status = status
+
+    def refresh(self):
+        self._draw()
+
+    # -- drawing
+    def _bar(self) -> str:
+        s = self.stats
+        total = max(s.queued, 1)
+        frac = min(s.done / total, 1.0)
+        filled = round(self.BAR_WIDTH * frac)
+        return f"[{'#' * filled}{'.' * (self.BAR_WIDTH - filled)}] {frac * 100:5.1f}%"
+
+    def _render(self) -> list[str]:
+        s = self.stats
+        width = min(shutil.get_terminal_size((100, 24)).columns, 100)
+        c = {"cyan": "\x1b[36m", "green": "\x1b[32m", "yellow": "\x1b[33m",
+             "red": "\x1b[31m", "dim": "\x1b[2m", "off": "\x1b[0m", "bold": "\x1b[1m"}
+
+        lines = [f"{c['bold']}{self.title}{c['off']}", ""]
+        lines.append(f"  {c['cyan']}{self._bar()}{c['off']}  "
+                     f"{s.done}/{s.queued}   {s.rate:4.1f} ảnh/s   {s.mb:6.1f}MB")
+        lines.append(
+            f"  {c['green']}{s.uploaded:5d} uploaded{c['off']}   "
+            f"{s.faces:5d} faces   "
+            f"{c['yellow']}{s.duplicates:4d} dup{c['off']}   "
+            f"{s.skipped:4d} skipped   "
+            f"{c['red'] if s.failed else c['dim']}{s.failed:3d} failed{c['off']}"
+        )
+        lines.append(f"  {c['dim']}{self.status}{c['off']}")
+        lines.append("")
+        for level, msg in self.events[-self.TAIL:]:
+            colour = c["red"] if level == "error" else c["dim"] if level == "dim" else ""
+            lines.append(f"  {colour}{msg[:width - 4]}{c['off']}")
+        if self.watching:
+            lines += ["", f"  {c['dim']}watching for new files, ctrl-c to stop{c['off']}"]
+        return lines
+
+    def _draw(self, final: bool = False):
+        with self._lock:
+            out = self._render()
+            buf = []
+            if self._lines:
+                buf.append(f"\x1b[{self._lines}A")  # back to the top of the block
+            for line in out:
+                buf.append("\x1b[2K" + line + "\n")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+            self._lines = 0 if final else len(out)
+
+
+def make_ui(stats: Stats, title: str, watching: bool, force_plain: bool):
+    interactive = sys.stdout.isatty() and os.environ.get("TERM") not in (None, "dumb")
+    if force_plain or not interactive:
+        return PlainUI(stats, title)
+    return LiveUI(stats, title, watching)
+
+
+# --------------------------------------------------------------------------
+# uploader
+# --------------------------------------------------------------------------
+class Uploader:
+    def __init__(self, args, state: State, stats: Stats, ui):
+        self.args, self.state, self.stats, self.ui = args, state, stats, ui
+        self.fatal: str | None = None
+        self._seen_lock = threading.Lock()
+        self._in_flight: set[str] = set()
+
+    def plan(self, paths):
+        """Hash and filter: returns the files that actually need sending."""
+        todo = []
+        for p in paths:
+            digest = self.state.known_hash(p) or file_hash(p)
+            if self.state.seen(digest):
+                self.state.note_path(p, digest)
+                self.stats.add(skipped=1)
+                continue
+            with self._seen_lock:
+                if digest in self._in_flight:  # same content twice in one run
+                    self.stats.add(skipped=1)
+                    self.ui.log(f"skip duplicate content: {p.name}", "dim")
+                    continue
+                self._in_flight.add(digest)
+            todo.append((p, digest))
+        return todo
+
+    def send(self, items):
+        """Upload one batch of (path, digest) with retries. Returns nothing."""
+        paths = [p for p, _ in items]
+        size = sum(p.stat().st_size for p in paths)
+        for attempt in range(self.args.retries + 1):
+            if self.fatal:
+                return
+            try:
+                result = post_batch(self.args.url, self.args.token, paths,
+                                    timeout=self.args.timeout)
+                self._record(items, result, size)
+                return
+            except urllib.error.HTTPError as e:
+                self.fatal = explain(e)
+                self.ui.log(self.fatal, "error")
+                return
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                if attempt == self.args.retries:
+                    self.stats.add(failed=len(paths))
+                    self.ui.log(f"giving up on {len(paths)} file(s): {e}", "error")
+                    return
+                wait = 2 ** attempt
+                self.ui.log(f"network error, retry in {wait}s ({e})", "error")
+                time.sleep(wait)
+
+    def _record(self, items, result: dict, size: int):
+        by_name = {p["filename"]: p for p in result.get("photos", [])}
+        for p, digest in items:
+            entry = by_name.get(p.name, {})
+            if entry.get("ok"):
+                self.state.mark(p, digest)
+                if entry.get("duplicate"):
+                    self.stats.add(duplicates=1)
+                    self.ui.log(f"already on server: {p.name}", "dim")
+                else:
+                    self.stats.add(uploaded=1, faces=entry.get("faces", 0))
+                    self.ui.log(f"{p.name}  ({entry.get('faces', 0)} faces)")
+            else:
+                self.stats.add(failed=1)
+                self.ui.log(f"{p.name}: {entry.get('error', 'rejected')}", "error")
+        self.stats.add(bytes_sent=size)
+        self.state.save()
+
+    def run(self, paths) -> bool:
+        """Plan, batch and upload. False if a fatal server error stopped us."""
+        todo = self.plan(paths)
+        if not todo:
+            return True
+        self.stats.add(queued=len(todo))
+        groups = list(batches([p for p, _ in todo], self.args.batch))
+        digest_of = dict(todo)
+        with ThreadPoolExecutor(max_workers=self.args.workers) as pool:
+            futures = [pool.submit(self.send, [(p, digest_of[p]) for p in g]) for g in groups]
+            for f in futures:
+                f.result()
+        self.state.save()
+        return self.fatal is None
+
+
+def settled(p: Path, now: float) -> bool:
+    """True once a file has stopped being written to (a copy in progress)."""
+    try:
+        return now - p.stat().st_mtime >= SETTLE_SECONDS
+    except OSError:
+        return False
+
+
+def watch(args, state: State, stats: Stats, ui, uploader: Uploader):
+    """Keep scanning the folder and upload whatever appears."""
+    pending: queue.Queue = queue.Queue()
+    while True:
+        now = time.time()
+        fresh = [p for p in iter_images(args.folder)
+                 if settled(p, now) and not state.known_hash(p)]
+        if fresh:
+            ui.set_status(f"uploading {len(fresh)} new file(s)")
+            if not uploader.run(fresh):
+                return False
+        ui.set_status(f"idle, watching {args.folder}")
+        ui.refresh()
+        time.sleep(args.interval)
+        if not pending.empty():  # pragma: no cover - reserved for signal handling
+            break
+    return True
+
+
+# --------------------------------------------------------------------------
+# cli
+# --------------------------------------------------------------------------
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path, nargs="?", default=Path("uploads"),
@@ -117,12 +466,23 @@ def main(argv=None) -> int:
                     help="server base URL (default: $FACESCAN_URL or http://localhost:8000)")
     ap.add_argument("--token", default=os.environ.get("FACESCAN_UPLOAD_TOKEN", ""),
                     help="upload token (default: $FACESCAN_UPLOAD_TOKEN)")
-    ap.add_argument("--batch", type=int, default=10, help="photos per request (default: 10)")
-    ap.add_argument("--force", action="store_true", help="re-send files already uploaded")
-    ap.add_argument("--dry-run", action="store_true", help="list what would be sent, send nothing")
+    ap.add_argument("--watch", action="store_true",
+                    help="keep running and upload files as they are dropped in")
+    ap.add_argument("--interval", type=float, default=WATCH_INTERVAL,
+                    help=f"seconds between watch scans (default: {WATCH_INTERVAL})")
+    ap.add_argument("--workers", type=int, default=3, help="parallel uploads (default: 3)")
+    ap.add_argument("--batch", type=int, default=8, help="photos per request (default: 8)")
+    ap.add_argument("--timeout", type=int, default=900, help="per-request timeout in seconds")
     ap.add_argument("--retries", type=int, default=2, help="retries per batch on network errors")
+    ap.add_argument("--force", action="store_true", help="ignore local state and re-send")
+    ap.add_argument("--dry-run", action="store_true", help="list what would be sent")
+    ap.add_argument("--plain", action="store_true", help="plain output instead of the live view")
     ap.add_argument("--state", type=Path, help=f"state file (default: <folder>/{STATE_NAME})")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
 
     if not args.folder.is_dir():
         print(f"No such folder: {args.folder}", file=sys.stderr)
@@ -132,58 +492,39 @@ def main(argv=None) -> int:
         return 2
 
     state_path = args.state or args.folder / STATE_NAME
-    state = {} if args.force else load_state(state_path)
+    if args.force and state_path.exists():
+        state_path.unlink()
+    state = State(state_path)
+    stats = Stats()
 
-    found = list(iter_images(args.folder))
-    todo = [p for p in found if state.get(str(p.resolve())) != key_of(p)]
-    skipped = len(found) - len(todo)
-
-    print(f"{len(found)} images under {args.folder}"
-          f"{f', {skipped} already uploaded' if skipped else ''}"
-          f" -> {len(todo)} to send")
-    if not todo:
-        return 0
     if args.dry_run:
+        found = list(iter_images(args.folder))
+        todo = [p for p in found if not state.seen(state.known_hash(p) or file_hash(p))]
+        print(f"{len(found)} images, {len(todo)} to send")
         for p in todo:
             print("  would send", p)
         return 0
 
-    sent = faces = failed = 0
-    for batch in batches(todo, args.batch):
-        for attempt in range(args.retries + 1):
-            try:
-                result = post_batch(args.url, args.token, batch)
-                break
-            except urllib.error.HTTPError as e:
-                print(f"  ! {explain(e)}", file=sys.stderr)
-                return 1  # a rejected request will not succeed on retry
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                if attempt == args.retries:
-                    print(f"  ! giving up on {len(batch)} file(s): {e}", file=sys.stderr)
-                    failed += len(batch)
-                    result = None
-                    break
-                wait = 2 ** attempt
-                print(f"  . network error ({e}); retrying in {wait}s", file=sys.stderr)
-                time.sleep(wait)
-        if result is None:
-            continue
+    title = f"FaceScan upload  {args.folder}  ->  {args.url}"
+    ui = make_ui(stats, title, args.watch, args.plain)
+    uploader = Uploader(args, state, stats, ui)
+    ok = True
+    with ui:
+        try:
+            if hasattr(ui, "set_status"):
+                ui.set_status("scanning")
+            ok = uploader.run(list(iter_images(args.folder)))
+            if ok and args.watch:
+                ok = watch(args, state, stats, ui, uploader)
+        except KeyboardInterrupt:
+            if hasattr(ui, "set_status"):
+                ui.set_status("stopped")
+        finally:
+            state.save()
 
-        by_name = {p["filename"]: p for p in result["photos"]}
-        for p in batch:
-            entry = by_name.get(p.name)
-            if entry and entry["ok"]:
-                state[str(p.resolve())] = key_of(p)
-            else:
-                failed += 1
-                print(f"  ! {p.name}: {(entry or {}).get('error', 'rejected')}", file=sys.stderr)
-        sent += result["indexed"]
-        faces += result["faces"]
-        save_state(state_path, state)  # checkpoint: a Ctrl-C keeps the progress
-        print(f"  {sent}/{len(todo)} uploaded ({faces} faces)")
-
-    print(f"\nDone. {sent} uploaded, {faces} faces indexed, {failed} failed, {skipped} skipped.")
-    return 1 if failed else 0
+    if uploader.fatal:
+        return 1
+    return 1 if stats.failed else 0
 
 
 if __name__ == "__main__":

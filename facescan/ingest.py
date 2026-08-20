@@ -36,6 +36,7 @@ def _process_one(img_path_str: str):
     faces = extract_faces(small)
     return {
         "path": img_path_str,
+        "sha256": db.file_hash(img_path_str),
         "width": w,       # original dimensions: the gallery lays out with these
         "height": h,
         "faces": [
@@ -51,7 +52,8 @@ def _process_one(img_path_str: str):
 
 
 def _store(conn, result, mtime: float) -> int:
-    photo_id = db.upsert_photo(conn, result["path"], mtime, result["width"], result["height"])
+    photo_id = db.upsert_photo(conn, result["path"], mtime, result["width"], result["height"],
+                               result.get("sha256"))
     for f in result["faces"]:
         db.add_face(conn, photo_id, f["bbox"], f["det_score"], f["embedding"])
     db.set_face_count(conn, photo_id, len(result["faces"]))

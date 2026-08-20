@@ -272,7 +272,7 @@ def api_upload(
     dest_dir = PHOTOS_DIR / UPLOAD_SUBDIR
     dest_dir.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
-    results, indexed, total_faces = [], 0, 0
+    results, indexed, total_faces, duplicates = [], 0, 0, 0
 
     try:
         for f in files:
@@ -284,6 +284,16 @@ def api_upload(
                 results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
                 continue
 
+            # Same bytes already indexed (re-sent, or the same shot filed under
+            # two names): keep the copy on disk, do not index it twice.
+            digest = hashlib.sha256(data).hexdigest()
+            existing = db.photo_by_hash(conn, digest)
+            if existing:
+                duplicates += 1
+                results.append(dict(_photo_urls(existing), filename=f.filename,
+                                    ok=True, duplicate=True, faces=0))
+                continue
+
             dest = dest_dir / _upload_name(f.filename)
             dest.write_bytes(data)
             with _infer_lock:  # the model is not thread-safe
@@ -293,6 +303,7 @@ def api_upload(
                 results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
                 continue
 
+            result["sha256"] = digest
             faces = ingest._store(conn, result, dest.stat().st_mtime)
             indexed += 1
             total_faces += faces
@@ -303,7 +314,12 @@ def api_upload(
         conn.close()
 
     index.refresh(force=True)
-    return {"indexed": indexed, "faces": total_faces, "photos": results}
+    return {
+        "indexed": indexed,
+        "faces": total_faces,
+        "duplicates": duplicates,
+        "photos": results,
+    }
 
 
 @app.post("/api/download-zip")

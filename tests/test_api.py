@@ -32,11 +32,16 @@ def client(db_path, photos_dir, monkeypatch):
         yield c
 
 
-def _jpeg_bytes(w=64, h=64) -> bytes:
-    img = np.full((h, w, 3), 128, dtype=np.uint8)
+def _jpeg_bytes(w=64, h=64, shade=128) -> bytes:
+    img = np.full((h, w, 3), shade, dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", img)
     assert ok
     return buf.tobytes()
+
+
+def _distinct_jpegs(n: int) -> list[bytes]:
+    """n images with different content, so content dedupe does not merge them."""
+    return [_jpeg_bytes(shade=10 + i * 20) for i in range(n)]
 
 
 def _seed_face(db_path, path: str, emb):
@@ -301,9 +306,42 @@ def test_upload_indexes_the_photo(client, upload_ready):
 
 
 def test_upload_accepts_a_batch(client, upload_ready):
-    files = [("files", (f"p{i}.jpg", _jpeg_bytes(), "image/jpeg")) for i in range(3)]
+    files = [("files", (f"p{i}.jpg", data, "image/jpeg"))
+             for i, data in enumerate(_distinct_jpegs(3))]
     assert _upload(client, files).json()["indexed"] == 3
     assert client.get("/api/photos").json()["total"] == 3
+
+
+def test_upload_skips_content_already_indexed(client, upload_ready):
+    photo = ("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))
+    assert _upload(client, [photo]).json()["indexed"] == 1
+
+    # same bytes, different filename
+    again = _upload(client, [("files", ("copy.jpg", _jpeg_bytes(), "image/jpeg"))]).json()
+
+    assert again["indexed"] == 0
+    assert again["duplicates"] == 1
+    assert again["photos"][0]["duplicate"] is True
+    assert client.get("/api/photos").json()["total"] == 1  # gallery shows it once
+    assert len(list(upload_ready.iterdir())) == 1          # and only one file on disk
+
+
+def test_upload_deduplicates_within_one_batch(client, upload_ready):
+    same = _jpeg_bytes()
+    files = [("files", (f"{n}.jpg", same, "image/jpeg")) for n in ("a", "b", "c")]
+
+    body = _upload(client, files).json()
+
+    assert (body["indexed"], body["duplicates"]) == (1, 2)
+    assert client.get("/api/photos").json()["total"] == 1
+
+
+def test_upload_still_indexes_different_photos(client, upload_ready):
+    files = [
+        ("files", ("a.jpg", _jpeg_bytes(64, 64), "image/jpeg")),
+        ("files", ("b.jpg", _jpeg_bytes(48, 96), "image/jpeg")),
+    ]
+    assert _upload(client, files).json()["indexed"] == 2
 
 
 def test_upload_requires_the_token(client, upload_ready):
@@ -339,7 +377,7 @@ def test_upload_rejects_oversized_files(client, upload_ready, monkeypatch):
 
 def test_upload_rejects_an_oversized_batch(client, upload_ready, monkeypatch):
     monkeypatch.setattr(app_module, "MAX_UPLOAD_BATCH", 2)
-    files = [("files", (f"p{i}.jpg", _jpeg_bytes(), "image/jpeg")) for i in range(3)]
+    files = [("files", (f"p{i}.jpg", d, "image/jpeg")) for i, d in enumerate(_distinct_jpegs(3))]
     assert _upload(client, files).status_code == 413
 
 
@@ -355,9 +393,11 @@ def test_upload_neutralizes_hostile_filenames(client, upload_ready):
 
 
 def test_upload_names_do_not_collide(client, upload_ready):
-    files = [("files", ("same.jpg", _jpeg_bytes(), "image/jpeg")) for _ in range(2)]
+    """Two different photos that happen to share a filename."""
+    files = [("files", ("same.jpg", data, "image/jpeg")) for data in _distinct_jpegs(2)]
+
     assert _upload(client, files).json()["indexed"] == 2
-    assert len(list(upload_ready.iterdir())) == 2
+    assert len(list(upload_ready.iterdir())) == 2  # both kept, distinct names
 
 
 def test_download_zip_bundles_the_photos(client, photos_dir):

@@ -1,4 +1,5 @@
 """SQLite storage for photos and face embeddings."""
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -13,7 +14,8 @@ CREATE TABLE IF NOT EXISTS photos (
     mtime REAL NOT NULL,
     width INTEGER,
     height INTEGER,
-    n_faces INTEGER DEFAULT 0
+    n_faces INTEGER DEFAULT 0,
+    sha256 TEXT
 );
 CREATE TABLE IF NOT EXISTS faces (
     id INTEGER PRIMARY KEY,
@@ -23,6 +25,7 @@ CREATE TABLE IF NOT EXISTS faces (
     embedding BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
+CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256);
 """
 
 
@@ -32,7 +35,34 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")  # readers (web app) don't block the ingest writer
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection):
+    """Add columns that databases created by older versions are missing."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+    if "sha256" not in have:
+        conn.execute("ALTER TABLE photos ADD COLUMN sha256 TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256)")
+        conn.commit()
+
+
+def file_hash(path) -> str:
+    """Content hash used to recognise the same photo under a different name."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def photo_by_hash(conn: sqlite3.Connection, digest: str):
+    """The path already indexed for this content, or None."""
+    row = conn.execute(
+        "SELECT path FROM photos WHERE sha256 = ? LIMIT 1", (digest,)
+    ).fetchone()
+    return row[0] if row else None
 
 
 def photo_is_indexed(conn: sqlite3.Connection, path: str, mtime: float) -> bool:
@@ -42,11 +72,12 @@ def photo_is_indexed(conn: sqlite3.Connection, path: str, mtime: float) -> bool:
     return row is not None and abs(row[0] - mtime) < 1e-6
 
 
-def upsert_photo(conn, path: str, mtime: float, width: int, height: int) -> int:
+def upsert_photo(conn, path: str, mtime: float, width: int, height: int,
+                 sha256: str | None = None) -> int:
     conn.execute("DELETE FROM photos WHERE path = ?", (path,))
     cur = conn.execute(
-        "INSERT INTO photos (path, mtime, width, height) VALUES (?, ?, ?, ?)",
-        (path, mtime, width, height),
+        "INSERT INTO photos (path, mtime, width, height, sha256) VALUES (?, ?, ?, ?, ?)",
+        (path, mtime, width, height, sha256),
     )
     return cur.lastrowid
 
