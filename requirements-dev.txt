@@ -1,5 +1,5 @@
 # Test/lint dependencies. Deliberately excludes insightface/onnxruntime:
 # the model stack is heavy and not exercised in CI (engine is lazy-loaded).
 pytest>=8.0
-httpx>=0.27
+httpx>=0.28.1
 ruff>=0.6
