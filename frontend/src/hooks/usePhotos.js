@@ -64,7 +64,7 @@ export default function usePhotos() {
         setStats(s);
         setPending(Math.max(0, s.photos - loadedTotal.current));
       } catch {
-        /* offline for a beat — try again next tick */
+        /* offline for a beat , try again next tick */
       }
     }, POLL_MS);
     return () => clearInterval(id);

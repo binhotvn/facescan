@@ -20,7 +20,7 @@ from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFil
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from facescan import db, ingest
-from facescan.engine import detect_query_face
+from facescan.engine import QUERY_MAX_EDGE, detect_query_face, downscale
 from facescan.index import HAVE_FAISS, FaceIndex
 
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +32,13 @@ MAX_UPLOAD_BYTES = int(os.environ.get("FACESCAN_MAX_UPLOAD_MB", "15")) * 1024 * 
 # Long-edge sizes: sm feeds the gallery grid, md the full-screen viewer. Serving
 # 5-10MB originals to phones on event wifi is what these exist to avoid.
 PHOTO_SIZES = {"sm": 480, "md": 1600}
+# Previews are re-encoded; WebP is ~30% smaller than JPEG at the same quality,
+# which is the difference between a gallery that loads on event wifi and one
+# that does not. Originals are only ever served for downloads.
+PHOTO_FORMATS = {
+    "webp": (".webp", "image/webp", [cv2.IMWRITE_WEBP_QUALITY, 82]),
+    "jpeg": (".jpg", "image/jpeg", [cv2.IMWRITE_JPEG_QUALITY, 85]),
+}
 MAX_PHOTO_BYTES = int(os.environ.get("FACESCAN_MAX_PHOTO_MB", "40")) * 1024 * 1024
 MAX_UPLOAD_BATCH = int(os.environ.get("FACESCAN_MAX_UPLOAD_BATCH", "50"))
 # Uploading is off unless a token is configured: an open endpoint on a public
@@ -144,6 +151,8 @@ def api_search(
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(400, "Could not decode image.")
+    # phone selfies arrive at 4000px; the detector gains nothing from that
+    img, _ = downscale(img, QUERY_MAX_EDGE)
     with _infer_lock:
         face = detect_query_face(img)
     if face is None:
@@ -176,14 +185,15 @@ def _safe_photo(path: str) -> Path:
     return p
 
 
-def _cache_path(p: Path, size: str) -> Path:
-    key = hashlib.sha1(f"{p}:{p.stat().st_mtime}:{size}".encode()).hexdigest()
-    return THUMBS_DIR / f"{key}.jpg"
+def _cache_path(p: Path, size: str, fmt: str) -> Path:
+    ext = PHOTO_FORMATS[fmt][0]
+    key = hashlib.sha1(f"{p}:{p.stat().st_mtime}:{size}:{fmt}".encode()).hexdigest()
+    return THUMBS_DIR / f"{key}{ext}"
 
 
-def _resized(p: Path, size: str) -> Path:
-    """Path to a cached long-edge-capped JPEG, rendering it on first request."""
-    cached = _cache_path(p, size)
+def _resized(p: Path, size: str, fmt: str) -> Path:
+    """Path to a cached long-edge-capped preview, rendering it on first request."""
+    cached = _cache_path(p, size, fmt)
     if cached.is_file():
         return cached
     img = cv2.imread(str(p))
@@ -194,7 +204,7 @@ def _resized(p: Path, size: str) -> Path:
     if scale < 1:
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     THUMBS_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(cached), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    cv2.imwrite(str(cached), img, PHOTO_FORMATS[fmt][2])
     return cached
 
 
@@ -204,17 +214,27 @@ def photo(
     size: str = Query("full", pattern="^(sm|md|full)$"),
     thumb: bool = False,
     download: bool = False,
+    accept: str = Header(default=""),
 ):
     p = _safe_photo(path)
     if thumb:  # pre-existing URLs from earlier clients
         size = "sm"
     if size == "full":
+        # the original, untouched — what "tải ảnh" hands over
         return FileResponse(p, filename=p.name if download else None)
-    return FileResponse(
-        _resized(p, size),
-        media_type="image/jpeg",
-        filename=p.name if download else None,
+
+    fmt = "webp" if "image/webp" in accept else "jpeg"
+    ext, media_type, _ = PHOTO_FORMATS[fmt]
+    resp = FileResponse(
+        _resized(p, size, fmt),
+        media_type=media_type,
+        filename=f"{p.stem}{ext}" if download else None,
     )
+    # the same URL serves WebP or JPEG depending on the client, so shared
+    # caches must key on Accept
+    resp.headers["Vary"] = "Accept"
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
 
 
 def _require_upload_token(token: str | None):

@@ -109,7 +109,7 @@ Deployment shape for a real event:
 | `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/medium/w/h`) |
 | `POST /api/upload` | Push event photos in (multipart `files`); each is indexed before the response. Requires `X-Upload-Token` |
 | `POST /api/download-zip` | Bundle a list of photo paths into one `.zip` |
-| `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid thumb, 1600px viewer copy, or the original |
+| `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid preview, 1600px viewer copy, or the original |
 | `POST /api/search` | Upload a portrait, get matching photos with scores |
 | `POST /api/refresh` | Reload the index after an ingest run |
 | `GET /api/stats`, `GET /healthz` | Counts and liveness |
@@ -117,6 +117,27 @@ Deployment shape for a real event:
 The UI is Vietnamese and gallery-first: every indexed photo is shown on load,
 and uploading a portrait (or using the camera) filters the grid down to matches.
 Match strictness is server-side (`FACESCAN_THRESHOLD`), not a user-facing control.
+
+## Image sizes
+
+Previews are re-encoded and capped by long edge: `sm` at 480px for the gallery
+grid, `md` at 1600px for the full-screen viewer. Both are served as **WebP**
+when the browser sends `Accept: image/webp`, and JPEG otherwise (the response
+carries `Vary: Accept` so shared caches keep them apart). On a 368KB event
+photo that is 31KB instead of 41KB for a grid preview. The **original file is
+only ever served for downloads** (`size=full`, or the download button), never
+for browsing. Rendered copies are cached on disk under `data/thumbs`, keyed by
+path, mtime, size and format.
+
+The gallery loads the first 12 photos eagerly and lazy-loads the rest, and the
+viewer prefetches the neighbouring photo so swiping does not wait on the network.
+
+Face detection runs on a copy capped at `FACESCAN_MAX_EDGE` (2560px), and query
+selfies at `FACESCAN_QUERY_MAX_EDGE` (1600px). Measured on 3840px event photos,
+the cap detects exactly the same faces with embeddings at 0.99+ cosine
+similarity to full-resolution ones, while cutting decoded image memory by about
+two thirds. It is not a speed fix: cost is dominated by recognition per face
+(about 170ms/face on CPU), not by resolution.
 
 ## Pushing photos in
 

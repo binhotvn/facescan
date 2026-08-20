@@ -82,7 +82,13 @@ export default function Lightbox({ photos, index, onIndex, onClose }) {
         key={photo.url} /* remount per photo so each one fades in */
         src={photo.medium}
         alt="Ảnh sự kiện"
+        fetchPriority="high"
+        decoding="async"
       />
+      {/* warm the neighbours so swiping does not wait on the network */}
+      {[photos[index - 1], photos[index + 1]].filter(Boolean).map((p) => (
+        <link key={p.url} rel="prefetch" as="image" href={p.medium} />
+      ))}
 
       {index > 0 && (
         <button

@@ -184,6 +184,59 @@ def test_photo_sizes_cap_the_long_edge(client, photos_dir):
     assert max(img.shape[:2]) == 3000
 
 
+def test_previews_are_webp_when_the_browser_accepts_it(client, photos_dir):
+    photo = photos_dir / "big.jpg"
+    photo.write_bytes(_jpeg_bytes(1200, 900))
+
+    webp = client.get("/photo", params={"path": str(photo), "size": "sm"},
+                      headers={"Accept": "image/avif,image/webp,*/*"})
+    jpeg = client.get("/photo", params={"path": str(photo), "size": "sm"},
+                      headers={"Accept": "image/*"})
+
+    assert webp.headers["content-type"] == "image/webp"
+    assert webp.content[:4] == b"RIFF" and webp.content[8:12] == b"WEBP"
+    assert jpeg.headers["content-type"] == "image/jpeg"
+    assert jpeg.content[:3] == b"\xff\xd8\xff"
+    assert webp.headers["vary"] == "Accept"  # shared caches must not mix them
+    assert "max-age" in webp.headers["cache-control"]
+
+
+def test_webp_preview_is_smaller_than_jpeg(client, photos_dir):
+    # a photo-like gradient, not flat colour, or the comparison means nothing
+    img = np.zeros((900, 1200, 3), np.uint8)
+    img[:, :, 0] = np.linspace(0, 255, 1200, dtype=np.uint8)
+    img[:, :, 1] = np.linspace(0, 255, 900, dtype=np.uint8)[:, None]
+    img[:, :, 2] = (np.random.default_rng(0).random((900, 1200)) * 90).astype(np.uint8)
+    photo = photos_dir / "grad.jpg"
+    photo.write_bytes(cv2.imencode(".jpg", img)[1].tobytes())
+
+    webp = client.get("/photo", params={"path": str(photo), "size": "md"},
+                      headers={"Accept": "image/webp"})
+    jpeg = client.get("/photo", params={"path": str(photo), "size": "md"},
+                      headers={"Accept": "image/*"})
+
+    assert len(webp.content) < len(jpeg.content)
+
+
+def test_full_size_is_the_untouched_original(client, photos_dir):
+    photo = photos_dir / "orig.jpg"
+    photo.write_bytes(_jpeg_bytes(1200, 900))
+
+    r = client.get("/photo", params={"path": str(photo), "size": "full"},
+                   headers={"Accept": "image/webp"})
+
+    assert r.content == photo.read_bytes()  # never re-encoded, even for a webp client
+    assert r.headers["content-type"] == "image/jpeg"
+
+
+def test_download_of_a_preview_names_the_right_extension(client, photos_dir):
+    photo = photos_dir / "a.jpg"
+    photo.write_bytes(_jpeg_bytes())
+    r = client.get("/photo", params={"path": str(photo), "size": "sm", "download": "1"},
+                   headers={"Accept": "image/webp"})
+    assert "a.webp" in r.headers["content-disposition"]
+
+
 def test_thumb_flag_still_means_sm(client, photos_dir):
     photo = photos_dir / "big.jpg"
     photo.write_bytes(_jpeg_bytes(1200, 900))

@@ -174,7 +174,7 @@ export default function App() {
 
         {!matches && pending > 0 && (
           <button type="button" className="fa-new" onClick={reload}>
-            <Renew size={16} /> {pending} ảnh mới — bấm để xem
+            <Renew size={16} /> {pending} ảnh mới, bấm để xem
           </button>
         )}
 

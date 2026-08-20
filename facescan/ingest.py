@@ -27,19 +27,21 @@ def iter_images(root: Path):
 
 def _process_one(img_path_str: str):
     """Worker: read + detect + embed one photo. Returns a picklable dict or None."""
-    from .engine import extract_faces  # model loads lazily, once per process
+    from .engine import downscale, extract_faces  # model loads lazily, once per process
     img = cv2.imread(img_path_str)
     if img is None:
         return None
     h, w = img.shape[:2]
-    faces = extract_faces(img)
+    small, scale = downscale(img)  # detection runs on a capped copy
+    faces = extract_faces(small)
     return {
         "path": img_path_str,
-        "width": w,
+        "width": w,       # original dimensions: the gallery lays out with these
         "height": h,
         "faces": [
             {
-                "bbox": [float(v) for v in f.bbox],
+                # map coordinates back to the original image
+                "bbox": [float(v) / scale for v in f.bbox],
                 "det_score": float(f.det_score),
                 "embedding": np.asarray(f.normed_embedding, dtype=np.float32),
             }

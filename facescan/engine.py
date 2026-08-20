@@ -20,6 +20,30 @@ def get_engine():
     return _app
 
 
+# Event photos are often 6000x4000. The detector works at FACESCAN_DET_SIZE
+# internally and recognition crops are 112x112, so feeding it the full frame
+# mostly buys decode/resize cost. Cap the long edge first.
+MAX_EDGE = int(os.environ.get("FACESCAN_MAX_EDGE", "2560"))
+QUERY_MAX_EDGE = int(os.environ.get("FACESCAN_QUERY_MAX_EDGE", "1600"))
+
+
+def downscale(image_bgr: np.ndarray, max_edge: int = 0):
+    """Shrink so the long edge is at most max_edge. Returns (image, scale).
+
+    scale is what the returned coordinates must be divided by to map back to
+    the original image.
+    """
+    import cv2
+    max_edge = max_edge or MAX_EDGE
+    h, w = image_bgr.shape[:2]
+    scale = max_edge / max(h, w)
+    if scale >= 1.0:
+        return image_bgr, 1.0
+    resized = cv2.resize(image_bgr, (round(w * scale), round(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+
 def extract_faces(image_bgr: np.ndarray):
     """Return list of faces: each has .bbox, .det_score, .normed_embedding."""
     return get_engine().get(image_bgr)

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const GAP = 4;
 
@@ -35,9 +35,12 @@ export default function JustifiedGrid({ photos, onOpen, onLoadMore, hasMore }) {
   const sentinel = useRef(null);
   const [width, setWidth] = useState(0);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
+    // Measure once, synchronously: hidden tabs (background tab, bfcache
+    // restore) get no ResizeObserver callback, and the grid would stay empty.
+    setWidth(el.clientWidth);
     const ro = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
     ro.observe(el);
     return () => ro.disconnect();
@@ -83,10 +86,14 @@ export default function JustifiedGrid({ photos, onOpen, onLoadMore, hasMore }) {
             >
               <img
                 src={photo.thumb}
-                loading="lazy"
                 alt="Ảnh sự kiện"
                 width={w}
                 height={h}
+                /* the first rows are above the fold on any screen: lazy there
+                   just delays what the visitor is already looking at */
+                loading={photo.index < 12 ? 'eager' : 'lazy'}
+                fetchPriority={photo.index < 4 ? 'high' : 'auto'}
+                decoding="async"
                 onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
               />
             </button>
