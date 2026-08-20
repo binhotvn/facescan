@@ -4,35 +4,67 @@
 
 // FF Agency brand red, sampled from the master logo (LOGO FF-12.png)
 $ff-red: #a13122;
+$ff-red-dark: #7d2418;
+$ff-red-soft: #fdecea;
+$page-bg: #f7f7f8;
+$radius: 8px;
+
+// Motion tokens. Built-in CSS easings are too weak for UI; these are the
+// standard strong curves, used for every transition in this file.
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --dur-fast: 140ms;
+  --dur: 200ms;
+}
 
 html,
 body {
-  background: #161616; // Carbon g100 $background
+  background: $page-bg;
+  color: #161616;
 }
 
-// Recolour Carbon's interactive tokens to the brand red instead of IBM blue.
-// The <Theme> wrapper re-declares these on .cds--g100, so match it too.
+// Brand red replaces IBM blue on every interactive token, in whichever
+// theme wrapper Carbon happens to render.
 :root,
-.cds--g100 {
+.cds--white,
+.cds--g10 {
   --cds-button-primary: #{$ff-red};
   --cds-button-primary-hover: #b93b28;
-  --cds-button-primary-active: #7d2418;
-  --cds-link-primary: #e8705c;
-  --cds-link-primary-hover: #f08a78;
-  --cds-focus: #f08a78;
+  --cds-button-primary-active: #{$ff-red-dark};
+  --cds-link-primary: #{$ff-red};
+  --cds-link-primary-hover: #{$ff-red-dark};
+  --cds-focus: #{$ff-red};
   --cds-interactive: #{$ff-red};
   --cds-border-interactive: #{$ff-red};
+  --cds-button-tertiary: #{$ff-red};
+  --cds-button-tertiary-hover: #{$ff-red-dark};
+  --cds-button-tertiary-active: #{$ff-red-dark};
 }
 
-// HeaderName wraps its children in a plain span, which stacks the block-level
-// mark above the wordmark; make that wrapper a flex row.
-.cds--header__name > span {
+#root {
+  min-block-size: 100vh;
+}
+
+// --- top bar ---------------------------------------------------------------
+.fa-topbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  padding: 0.875rem 1.5rem;
+  background: #fff;
+  border-block-end: 1px solid #e8e8ea;
+}
+
+.fa-brand {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+  color: inherit;
 }
 
 .fa-logo {
-  block-size: 1.375rem;
+  block-size: 1.5rem;
   display: block;
   margin-inline-end: 0.625rem;
 }
@@ -40,75 +72,253 @@ body {
 .fa-wordmark {
   font-weight: 600;
   letter-spacing: 0.06em;
+  font-size: 0.9375rem;
 }
 
-#root {
-  min-block-size: 100vh;
-}
-
-.fa-main {
-  padding: 4rem 1.5rem 4rem;
-  max-inline-size: 100rem;
-  margin-inline: auto;
-}
-
-.fa-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  align-items: flex-end;
-  justify-content: space-between;
-  margin-block-end: 2rem;
+// --- hero ------------------------------------------------------------------
+.fa-hero {
+  background: $ff-red;
+  color: #fff;
+  text-align: center;
+  padding: 3.5rem 1.5rem 5rem;
 
   h1 {
-    font-size: 1.75rem;
+    font-size: clamp(1.5rem, 3.2vw, 2.25rem);
     line-height: 1.25;
-  }
-
-  p {
-    margin-block-start: 0.25rem;
-    color: var(--cds-text-secondary);
+    font-weight: 400;
+    max-inline-size: 46rem;
+    margin-inline: auto;
   }
 
   &__actions {
     display: flex;
-    gap: 0.5rem;
     flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-block-start: 2rem;
+  }
+
+  &__loading {
+    display: flex;
+    justify-content: center;
+    margin-block-start: 2rem;
+    color: #fff;
+
+    .cds--inline-loading__text {
+      color: #fff;
+    }
   }
 }
 
-.fa-gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+.fa-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.9375rem 2rem;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  color: $ff-red;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+
+  // touch devices fire a false hover on tap, so gate the lift
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    }
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
+
+  &.is-ghost {
+    background: transparent;
+    color: #fff;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+  }
+}
+
+// --- floating facts card ---------------------------------------------------
+.fa-facts {
+  padding-inline: 1.5rem;
+  margin-block-start: -2.5rem;
+
+  &__card {
+    animation: fa-rise var(--dur) var(--ease-out) both;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    max-inline-size: 34rem;
+    margin-inline: auto;
+    padding: 1rem 1.5rem;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(22, 22, 22, 0.1);
+  }
+}
+
+.fa-fact {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.9375rem;
+
+  &__icon {
+    display: grid;
+    place-items: center;
+    inline-size: 2.5rem;
+    block-size: 2.5rem;
+    border-radius: 10px;
+
+    &.is-date {
+      background: #e8f5ec;
+      color: #0e6027;
+    }
+
+    &.is-photos {
+      background: $ff-red-soft;
+      color: $ff-red;
+    }
+  }
+
+  &__divider {
+    inline-size: 1px;
+    block-size: 2rem;
+    background: #e8e8ea;
+  }
+}
+
+// --- content ---------------------------------------------------------------
+.fa-main {
+  max-inline-size: 96rem;
+  margin-inline: auto;
+  padding: 2rem 1.5rem 6rem;
+}
+
+.fa-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
-  margin-block-start: 1.5rem;
+  padding-block-end: 1.5rem;
+  border-block-end: 1px solid #e8e8ea;
+
+  &__end {
+    margin-inline-start: auto;
+  }
+}
+
+.fa-chip {
+  padding: 0.625rem 1.125rem;
+  border: 1px solid #d5d5d9;
+  border-radius: $radius;
+  background: #fff;
+  color: #161616;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease;
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      border-color: $ff-red;
+    }
+  }
+
+  &.is-active {
+    background: $ff-red;
+    border-color: $ff-red;
+    color: #fff;
+  }
+}
+
+.fa-count {
+  margin-block: 1.5rem 1rem;
+  font-size: 0.9375rem;
+  color: #525252;
+
+  strong {
+    color: #161616;
+  }
+}
+
+.fa-new {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  inline-size: 100%;
+  margin-block-start: 1rem;
+  padding: 0.75rem 1rem;
+  border: 0;
+  border-radius: $radius;
+  background: $ff-red-soft;
+  color: $ff-red;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  animation: fa-rise var(--dur) var(--ease-out) both;
+}
+
+// --- gallery ---------------------------------------------------------------
+.fa-grid {
+  &__row {
+    display: flex;
+    margin-block-end: 8px;
+  }
+
+  &__sentinel {
+    block-size: 1px;
+  }
 }
 
 .fa-cell {
   position: relative;
   padding: 0;
   border: 0;
-  background: var(--cds-layer);
+  border-radius: $radius;
+  background: #ececee;
   cursor: pointer;
   overflow: hidden;
-  aspect-ratio: 1;
 
   img {
     inline-size: 100%;
     block-size: 100%;
     object-fit: cover;
     display: block;
-    transition: transform 150ms ease-out;
+    opacity: 0;
+    transform: translateY(8px);
+    transition:
+      opacity var(--dur) var(--ease-out),
+      transform var(--dur) var(--ease-out);
   }
 
-  &:hover img,
-  &:focus-visible img {
-    transform: scale(1.04);
+  // set by onLoad: photos arrive one by one, which is the stagger
+  img.is-loaded {
+    opacity: 1;
+    transform: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover img.is-loaded {
+      transform: scale(1.03);
+    }
   }
 
   &:focus-visible {
-    outline: 2px solid var(--cds-focus);
-    outline-offset: -2px;
+    outline: 2px solid $ff-red;
+    outline-offset: 2px;
   }
 
   &__tag {
@@ -118,36 +328,297 @@ body {
   }
 }
 
-.fa-more {
-  display: flex;
-  justify-content: center;
-  margin-block-start: 1.5rem;
-}
-
 .fa-empty {
-  padding: 2.5rem;
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 4rem 2rem;
   text-align: center;
+  color: #8d8d8d;
+  background: #fff;
+  border-radius: 12px;
+  animation: fa-fade var(--dur) var(--ease-out) both;
 
   p {
-    margin-block-start: 0.5rem;
-    color: var(--cds-text-secondary);
+    color: #525252;
   }
 }
 
-.fa-video {
-  inline-size: 100%;
-  max-inline-size: 30rem;
-  display: block;
-  margin-inline: auto;
+.fa-grid {
+  animation: fa-fade var(--dur) var(--ease-out) both;
 }
 
-.fa-full {
-  inline-size: 100%;
-  max-block-size: 70vh;
-  object-fit: contain;
-  display: block;
+// --- mobile dock -----------------------------------------------------------
+.fa-dock {
+  display: none;
 }
 
-.fa-download {
-  margin-block-start: 1rem;
+@media (max-width: 42rem) {
+  .fa-hero {
+    padding-block: 2.5rem 4.5rem;
+  }
+
+  .fa-dock {
+    position: fixed;
+    inset-inline: 0;
+    inset-block-end: 0;
+    z-index: 7000;
+    display: flex;
+    justify-content: center;
+    padding: 0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom, 0px));
+    background: rgba(255, 255, 255, 0.94);
+    backdrop-filter: blur(8px);
+    border-block-start: 1px solid #e8e8ea;
+
+    .fa-cta {
+      inline-size: 100%;
+      justify-content: center;
+      background: $ff-red;
+      color: #fff;
+    }
+  }
+}
+
+// --- camera ----------------------------------------------------------------
+.fa-camera {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border-radius: $radius;
+  min-block-size: 46vh;
+  max-block-size: 60vh;
+  overflow: hidden;
+
+  &__video,
+  &__shot {
+    inline-size: 100%;
+    max-block-size: 60vh;
+    object-fit: contain;
+    display: block;
+  }
+
+  &__video.is-mirrored {
+    transform: scaleX(-1);
+  }
+
+  &__guide {
+    position: absolute;
+    inset: 0;
+    inline-size: 100%;
+    block-size: 100%;
+    pointer-events: none;
+
+    ellipse {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.8);
+      stroke-width: 0.4;
+      stroke-dasharray: 3 2;
+      vector-effect: non-scaling-stroke;
+    }
+  }
+
+  &__hint {
+    position: absolute;
+    inset-block-end: 1rem;
+    inset-inline: 0;
+    text-align: center;
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    font-size: 0.875rem;
+  }
+
+  &__count {
+    position: absolute;
+    font-size: 7rem;
+    font-weight: 300;
+    color: #fff;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
+    animation: fa-tick 800ms var(--ease-out) both;
+  }
+
+  &__error {
+    color: var(--cds-text-error);
+    margin-block-end: 0.75rem;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block-start: 1rem;
+  }
+
+  &__spacer {
+    inline-size: 3rem;
+  }
+}
+
+.fa-shutter {
+  inline-size: 4rem;
+  block-size: 4rem;
+  border-radius: 50%;
+  border: 4px solid #fff;
+  background: $ff-red;
+  box-shadow: 0 0 0 1px #d5d5d9;
+  cursor: pointer;
+  transition: transform 100ms ease-out;
+
+  &:active {
+    transform: scale(0.92);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
+// --- lightbox --------------------------------------------------------------
+// Photos read best against a neutral dark ground, the way light-themed photo
+// apps do it; the rest of the interface stays light.
+.fa-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(20, 20, 22, 0.97);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fa-fade var(--dur) var(--ease-out) both;
+
+  &[data-state='closing'] {
+    animation: fa-fade 160ms var(--ease-out) reverse both;
+  }
+
+  &__bar {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.5rem 0.5rem 1.25rem;
+    color: #fff;
+  }
+
+  &__count {
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.875rem;
+  }
+
+  &__img {
+    max-inline-size: 92vw;
+    max-block-size: calc(100vh - 10rem);
+    object-fit: contain;
+    border-radius: $radius;
+    animation: fa-zoom var(--dur) var(--ease-out) both;
+  }
+
+  &__nav {
+    position: absolute;
+    inset-block-start: 50%;
+    transform: translateY(-50%);
+    inline-size: 3rem;
+    block-size: 3rem;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) ease;
+
+    @media (hover: hover) and (pointer: fine) {
+      &:hover {
+        background: rgba(255, 255, 255, 0.24);
+      }
+    }
+
+    &.is-prev {
+      inset-inline-start: 1rem;
+    }
+
+    &.is-next {
+      inset-inline-end: 1rem;
+    }
+
+    &.is-close {
+      position: static;
+      transform: none;
+    }
+  }
+
+  &__actions {
+    position: absolute;
+    inset-block-end: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    gap: 0.5rem;
+
+    // outline button sits on the dark ground, so it goes white, not brand red
+    .cds--btn--tertiary {
+      --cds-button-tertiary: #fff;
+      --cds-button-tertiary-hover: #fff;
+      --cds-button-tertiary-active: #fff;
+
+      color: #fff;
+      border-color: #fff;
+
+      &:hover {
+        color: #161616;
+        background: #fff;
+      }
+    }
+  }
+}
+
+// --- motion primitives -----------------------------------------------------
+@keyframes fa-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes fa-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes fa-zoom {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes fa-tick {
+  from {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+// Fewer and gentler, not none: opacity still carries the state change,
+// everything that moves stops moving.
+@media (prefers-reduced-motion: reduce) {
+  .fa-cell img {
+    transform: none;
+    transition: opacity var(--dur) ease;
+  }
+
+  .fa-cell:hover img.is-loaded,
+  .fa-cta:hover,
+  .fa-cta:active {
+    transform: none;
+  }
+
+  .fa-facts__card,
+  .fa-new,
+  .fa-lightbox__img,
+  .fa-camera__count {
+    animation-name: fa-fade;
+  }
 }

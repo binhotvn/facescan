@@ -1,5 +1,6 @@
 """End-to-end API tests with the face detector stubbed out (no model download)."""
 import io
+import zipfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -57,7 +58,9 @@ def test_healthz(client):
 
 def test_stats(client, db_path):
     _seed_face(db_path, "a.jpg", unit(1))
-    assert client.get("/api/stats").json() == {"photos": 1, "faces": 1}
+    body = client.get("/api/stats").json()
+    assert (body["photos"], body["faces"]) == (1, 1)
+    assert body["event"]["name"]  # event header copy, overridable via env
 
 
 def test_photos_lists_the_gallery(client, db_path, photos_dir):
@@ -70,7 +73,10 @@ def test_photos_lists_the_gallery(client, db_path, photos_dir):
     assert body["total"] == 2
     assert len(body["photos"]) == 2
     assert all(p["faces"] == 1 for p in body["photos"])
-    assert all(p["thumb"].endswith("&thumb=1") for p in body["photos"])
+    assert all(p["thumb"].endswith("&size=sm") for p in body["photos"])
+    assert all(p["medium"].endswith("&size=md") for p in body["photos"])
+    assert all(p["w"] == 64 and p["h"] == 64 for p in body["photos"])
+    assert all(isinstance(p["id"], int) for p in body["photos"])
 
 
 def test_photos_paginates(client, db_path, photos_dir):
@@ -116,7 +122,8 @@ def test_search_returns_matches(client, db_path, monkeypatch, photos_dir):
     assert len(matches) == 1
     assert matches[0]["score"] >= 0.99
     assert matches[0]["url"].startswith("/photo?path=")
-    assert matches[0]["thumb"].endswith("&thumb=1")
+    assert matches[0]["thumb"].endswith("&size=sm")
+    assert (matches[0]["w"], matches[0]["h"]) == (64, 64)
 
 
 def test_search_without_a_face_is_422(client, monkeypatch):
@@ -160,6 +167,92 @@ def test_photo_generates_a_thumbnail(client, photos_dir):
     assert r.headers["content-type"] == "image/jpeg"
     thumb = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
     assert max(thumb.shape[:2]) == 480
+
+
+def test_photo_sizes_cap_the_long_edge(client, photos_dir):
+    photo = photos_dir / "big.jpg"
+    photo.write_bytes(_jpeg_bytes(3000, 2000))
+
+    for size, edge in (("sm", 480), ("md", 1600)):
+        r = client.get("/photo", params={"path": str(photo), "size": size})
+        assert r.status_code == 200
+        img = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+        assert max(img.shape[:2]) == edge
+
+    full = client.get("/photo", params={"path": str(photo), "size": "full"})
+    img = cv2.imdecode(np.frombuffer(full.content, np.uint8), cv2.IMREAD_COLOR)
+    assert max(img.shape[:2]) == 3000
+
+
+def test_thumb_flag_still_means_sm(client, photos_dir):
+    photo = photos_dir / "big.jpg"
+    photo.write_bytes(_jpeg_bytes(1200, 900))
+    legacy = client.get("/photo", params={"path": str(photo), "thumb": "1"})
+    sized = client.get("/photo", params={"path": str(photo), "size": "sm"})
+    assert legacy.content == sized.content
+
+
+def test_photo_rejects_an_unknown_size(client, photos_dir):
+    photo = photos_dir / "a.jpg"
+    photo.write_bytes(_jpeg_bytes())
+    assert client.get("/photo", params={"path": str(photo), "size": "huge"}).status_code == 422
+
+
+def test_download_flag_sets_attachment(client, photos_dir):
+    photo = photos_dir / "a.jpg"
+    photo.write_bytes(_jpeg_bytes())
+    r = client.get("/photo", params={"path": str(photo), "download": "1"})
+    assert "attachment" in r.headers["content-disposition"]
+    assert "a.jpg" in r.headers["content-disposition"]
+
+
+def test_download_zip_bundles_the_photos(client, photos_dir):
+    paths = []
+    for name in ("a.jpg", "b.jpg"):
+        (photos_dir / name).write_bytes(_jpeg_bytes())
+        paths.append(str(photos_dir / name))
+
+    r = client.post("/api/download-zip", json={"paths": paths})
+
+    assert r.status_code == 200
+    assert "attachment" in r.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert sorted(zf.namelist()) == ["a.jpg", "b.jpg"]
+        assert zf.read("a.jpg") == (photos_dir / "a.jpg").read_bytes()
+
+
+def test_download_zip_deduplicates_filenames(client, photos_dir):
+    (photos_dir / "sub").mkdir()
+    for p in (photos_dir / "a.jpg", photos_dir / "sub" / "a.jpg"):
+        p.write_bytes(_jpeg_bytes())
+
+    r = client.post(
+        "/api/download-zip",
+        json={"paths": [str(photos_dir / "a.jpg"), str(photos_dir / "sub" / "a.jpg")]},
+    )
+
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert sorted(zf.namelist()) == ["a-1.jpg", "a.jpg"]
+
+
+def test_download_zip_rejects_paths_outside_photos_dir(client, photos_dir, tmp_path):
+    (photos_dir / "a.jpg").write_bytes(_jpeg_bytes())
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(_jpeg_bytes())
+
+    r = client.post(
+        "/api/download-zip",
+        json={"paths": [str(photos_dir / "a.jpg"), str(outside)]},
+    )
+
+    assert r.status_code == 404
+    assert client.post("/api/download-zip", json={"paths": ["/etc/passwd"]}).status_code == 404
+
+
+def test_download_zip_rejects_empty_and_oversized_requests(client, photos_dir):
+    assert client.post("/api/download-zip", json={"paths": []}).status_code == 400
+    too_many = [str(photos_dir / "a.jpg")] * 201
+    assert client.post("/api/download-zip", json={"paths": too_many}).status_code == 413
 
 
 def test_photo_rejects_paths_outside_photos_dir(client, tmp_path):

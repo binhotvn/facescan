@@ -79,7 +79,10 @@ class FaceIndex:
         for i, s in pairs:
             m = meta[i]
             if m["path"] not in best or s > best[m["path"]]["score"]:
-                best[m["path"]] = {"path": m["path"], "score": s, "bbox": m["bbox"]}
+                best[m["path"]] = {
+                    "id": m["photo_id"], "path": m["path"], "score": s,
+                    "bbox": m["bbox"], "w": m["w"], "h": m["h"],
+                }
         return sorted(best.values(), key=lambda r: -r["score"])
 
     @property

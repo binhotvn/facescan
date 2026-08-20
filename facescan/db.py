@@ -69,14 +69,15 @@ def set_face_count(conn, photo_id: int, n: int):
 def load_index(conn):
     """Return (embeddings [N,512] float32, face_meta list of dicts) for the whole DB."""
     rows = conn.execute(
-        """SELECT f.embedding, f.photo_id, p.path, f.bbox_x1, f.bbox_y1, f.bbox_x2, f.bbox_y2
+        """SELECT f.embedding, f.photo_id, p.path, f.bbox_x1, f.bbox_y1, f.bbox_x2, f.bbox_y2,
+                  p.width, p.height
            FROM faces f JOIN photos p ON p.id = f.photo_id"""
     ).fetchall()
     if not rows:
         return np.zeros((0, 512), dtype=np.float32), []
     embs = np.frombuffer(b"".join(r[0] for r in rows), dtype=np.float32).reshape(len(rows), -1)
     meta = [
-        {"photo_id": r[1], "path": r[2], "bbox": [r[3], r[4], r[5], r[6]]}
+        {"photo_id": r[1], "path": r[2], "bbox": [r[3], r[4], r[5], r[6]], "w": r[7], "h": r[8]}
         for r in rows
     ]
     return embs, meta
@@ -85,10 +86,13 @@ def load_index(conn):
 def list_photos(conn, limit: int = 120, offset: int = 0):
     """Newest-indexed first page of photos for the gallery view."""
     rows = conn.execute(
-        "SELECT path, n_faces FROM photos ORDER BY id DESC LIMIT ? OFFSET ?",
+        "SELECT id, path, width, height, n_faces FROM photos ORDER BY id DESC LIMIT ? OFFSET ?",
         (limit, offset),
     ).fetchall()
-    return [{"path": r[0], "n_faces": r[1]} for r in rows]
+    return [
+        {"id": r[0], "path": r[1], "w": r[2], "h": r[3], "n_faces": r[4]}
+        for r in rows
+    ]
 
 
 def stats(conn):

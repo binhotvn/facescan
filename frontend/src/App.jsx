@@ -1,51 +1,33 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { Theme, Button, InlineNotification, InlineLoading, Loading } from '@carbon/react';
 import {
-  Theme,
-  Header,
-  HeaderName,
-  Button,
-  Tag,
-  Tile,
-  InlineNotification,
-  InlineLoading,
-  Modal,
-  Loading,
-} from '@carbon/react';
-import { Camera, Image as ImageIcon, ArrowLeft } from '@carbon/icons-react';
+  Camera,
+  Image as ImageIcon,
+  Calendar,
+  Download,
+  Renew,
+  Search,
+} from '@carbon/icons-react';
 
-const PAGE_SIZE = 120;
+import usePhotos from './hooks/usePhotos';
+import JustifiedGrid from './components/JustifiedGrid';
+import CameraModal from './components/CameraModal';
+import Lightbox from './components/Lightbox';
 
 export default function App() {
-  const [stats, setStats] = useState(null);
-  const [gallery, setGallery] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const { photos, total, stats, loading, error, setError, pending, hasMore, loadMore, reload } =
+    usePhotos();
+  const [matches, setMatches] = useState(null); // null = browsing the whole gallery
   const [searching, setSearching] = useState(false);
-  const [matches, setMatches] = useState(null); // null = showing the whole gallery
-  const [error, setError] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
-  const [lightbox, setLightbox] = useState(null);
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
+  const [zipping, setZipping] = useState(false);
+  const [lightboxAt, setLightboxAt] = useState(null);
   const fileRef = useRef(null);
 
-  const loadPage = useCallback(async (offset = 0) => {
-    const res = await fetch(`/api/photos?limit=${PAGE_SIZE}&offset=${offset}`);
-    const data = await res.json();
-    setTotal(data.total);
-    setGallery((prev) => (offset === 0 ? data.photos : [...prev, ...data.photos]));
-  }, []);
+  const shown = matches ?? photos;
+  const event = stats?.event;
 
-  useEffect(() => {
-    Promise.all([
-      fetch('/api/stats').then((r) => r.json()).then(setStats),
-      loadPage(0),
-    ])
-      .catch(() => setError('Không tải được thư viện ảnh.'))
-      .finally(() => setLoading(false));
-  }, [loadPage]);
-
-  async function runSearch(file) {
+  async function search(file) {
     if (!file) return;
     setSearching(true);
     setError(null);
@@ -56,105 +38,114 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || res.statusText);
       setMatches(data.matches);
-    } catch (err) {
-      setError(err.message);
+      document.querySelector('.fa-chips')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+      setError(e.message);
       setMatches(null);
     } finally {
       setSearching(false);
     }
   }
 
-  async function openCamera() {
-    setError(null);
+  async function downloadZip() {
+    setZipping(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-      streamRef.current = stream;
-      setCameraOpen(true);
-      requestAnimationFrame(() => {
-        if (videoRef.current) videoRef.current.srcObject = stream;
+      const res = await fetch('/api/download-zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: matches.map((m) => m.path) }),
       });
-    } catch (err) {
-      setError(`Không mở được máy ảnh: ${err.message}`);
+      if (!res.ok) throw new Error('Không tạo được file .zip.');
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'anh-cua-toi.zip';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setZipping(false);
     }
   }
 
-  function closeCamera() {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setCameraOpen(false);
-  }
-
-  function capture() {
-    const video = videoRef.current;
-    if (!video) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    canvas.toBlob(
-      (blob) => {
-        closeCamera();
-        runSearch(new File([blob], 'selfie.jpg', { type: 'image/jpeg' }));
-      },
-      'image/jpeg',
-      0.92
-    );
-  }
-
-  const photos = matches ?? gallery;
-  const showLoadMore = !matches && gallery.length < total;
-
   return (
-    <Theme theme="g100">
-      <Header aria-label="FF Agency">
-        <HeaderName href="/" prefix="">
+    <Theme theme="white">
+      <header className="fa-topbar">
+        <a className="fa-brand" href="/">
           <img className="fa-logo" src="/ff-mark.png" alt="" aria-hidden="true" />
           <span className="fa-wordmark">FF AGENCY</span>
-        </HeaderName>
-      </Header>
+        </a>
+      </header>
+
+      <section className="fa-hero">
+        <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
+        {searching ? (
+          <div className="fa-hero__loading">
+            <InlineLoading description="Đang tìm ảnh có bạn…" />
+          </div>
+        ) : (
+          <div className="fa-hero__actions">
+            <button type="button" className="fa-cta" onClick={() => setCameraOpen(true)}>
+              <Search size={20} />
+              Tìm ảnh của bạn
+            </button>
+            <button type="button" className="fa-cta is-ghost" onClick={() => fileRef.current?.click()}>
+              <ImageIcon size={20} />
+              Tải ảnh lên
+            </button>
+          </div>
+        )}
+      </section>
+
+      <div className="fa-facts">
+        <div className="fa-facts__card">
+          {/* the date half only appears when FACESCAN_EVENT_DATE is set */}
+          {event?.date && (
+            <>
+              <div className="fa-fact">
+                <span className="fa-fact__icon is-date">
+                  <Calendar size={20} />
+                </span>
+                <span>{event.date}</span>
+              </div>
+              <span className="fa-fact__divider" />
+            </>
+          )}
+          <div className="fa-fact">
+            <span className="fa-fact__icon is-photos">
+              <ImageIcon size={20} />
+            </span>
+            <span>{total.toLocaleString('vi-VN')} ảnh</span>
+          </div>
+        </div>
+      </div>
 
       <main className="fa-main">
-        <div className="fa-bar">
-          <div className="fa-bar__text">
-            <h1>{matches ? `Tìm thấy ${matches.length} ảnh có bạn` : 'Ảnh sự kiện'}</h1>
-            <p>
-              {matches
-                ? 'Bấm vào ảnh để xem cỡ lớn hoặc tải về.'
-                : stats
-                  ? `${stats.photos} ảnh · ${stats.faces} khuôn mặt. Tải lên ảnh chân dung để tìm ảnh có bạn.`
-                  : 'Đang tải…'}
-            </p>
-          </div>
-
-          <div className="fa-bar__actions">
-            {searching ? (
-              <InlineLoading description="Đang tìm ảnh có bạn…" />
-            ) : matches ? (
-              <Button kind="tertiary" renderIcon={ArrowLeft} onClick={() => setMatches(null)}>
-                Xem tất cả ảnh
-              </Button>
-            ) : (
-              <>
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  hidden
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    e.target.value = '';
-                    runSearch(f);
-                  }}
-                />
-                <Button renderIcon={ImageIcon} onClick={() => fileRef.current?.click()}>
-                  Tải ảnh lên để tìm
+        <div className="fa-chips">
+          <button
+            type="button"
+            className={`fa-chip${matches ? '' : ' is-active'}`}
+            onClick={() => setMatches(null)}
+          >
+            Tất cả ảnh
+          </button>
+          {matches && (
+            <button type="button" className="fa-chip is-active">
+              Ảnh của bạn ({matches.length})
+            </button>
+          )}
+          {matches && matches.length > 0 && (
+            <div className="fa-chips__end">
+              {zipping ? (
+                <InlineLoading description="Đang nén ảnh…" />
+              ) : (
+                <Button size="sm" renderIcon={Download} onClick={downloadZip}>
+                  Tải tất cả (.zip)
                 </Button>
-                <Button kind="tertiary" renderIcon={Camera} onClick={openCamera}>
-                  Chụp ảnh
-                </Button>
-              </>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
 
         {error && (
@@ -171,81 +162,77 @@ export default function App() {
           <InlineNotification
             kind="info"
             title="Không tìm thấy ảnh nào"
-            subtitle="Hãy thử ảnh chân dung rõ mặt, chụp chính diện."
+            subtitle="Hãy thử ảnh rõ mặt, chụp chính diện và đủ sáng."
             hideCloseButton
             lowContrast
           />
         )}
 
-        {loading ? (
-          <Loading description="Đang tải ảnh" withOverlay={false} />
-        ) : photos.length === 0 && !matches ? (
-          <Tile className="fa-empty">
-            <h4>Thư viện đang trống</h4>
-            <p>Thêm ảnh vào thư mục photos/ rồi chạy lệnh lập chỉ mục.</p>
-          </Tile>
-        ) : (
-          <div className="fa-gallery">
-            {photos.map((p) => (
-              <button
-                type="button"
-                key={p.url}
-                className="fa-cell"
-                onClick={() => setLightbox(p)}
-              >
-                <img src={p.thumb} loading="lazy" alt="Ảnh sự kiện" />
-                {p.score != null && (
-                  <Tag className="fa-cell__tag" type="green" size="sm">
-                    {Math.round(p.score * 100)}%
-                  </Tag>
-                )}
-              </button>
-            ))}
-          </div>
+        {!matches && pending > 0 && (
+          <button type="button" className="fa-new" onClick={reload}>
+            <Renew size={16} /> {pending} ảnh mới — bấm để xem
+          </button>
         )}
 
-        {showLoadMore && (
-          <div className="fa-more">
-            <Button kind="ghost" onClick={() => loadPage(gallery.length)}>
-              Tải thêm ảnh ({gallery.length}/{total})
-            </Button>
+        <p className="fa-count">
+          <strong>{shown.length.toLocaleString('vi-VN')}</strong>{' '}
+          {matches ? 'ảnh có bạn' : `ảnh được tìm thấy${hasMore ? ` (trong ${total})` : ''}`}
+        </p>
+
+        {loading ? (
+          <Loading description="Đang tải ảnh" withOverlay={false} />
+        ) : shown.length === 0 && !matches ? (
+          <div className="fa-empty">
+            <ImageIcon size={32} />
+            <p>Ảnh sự kiện sẽ xuất hiện ở đây ngay khi được tải lên.</p>
           </div>
+        ) : (
+          <JustifiedGrid
+            photos={shown}
+            onOpen={setLightboxAt}
+            onLoadMore={loadMore}
+            hasMore={!matches && hasMore}
+          />
         )}
       </main>
 
-      <Modal
-        open={cameraOpen}
-        modalHeading="Chụp ảnh chân dung"
-        primaryButtonText="Chụp"
-        secondaryButtonText="Huỷ"
-        onRequestSubmit={capture}
-        onRequestClose={closeCamera}
-      >
-        {cameraOpen && <video className="fa-video" ref={videoRef} autoPlay playsInline muted />}
-      </Modal>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          search(f);
+        }}
+      />
 
-      <Modal
-        open={!!lightbox}
-        passiveModal
-        modalHeading="Ảnh sự kiện"
-        onRequestClose={() => setLightbox(null)}
-        size="lg"
-      >
-        {lightbox && (
-          <>
-            <img className="fa-full" src={lightbox.url} alt="Ảnh sự kiện cỡ lớn" />
-            <Button
-              className="fa-download"
-              kind="tertiary"
-              href={lightbox.url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Mở ảnh gốc
-            </Button>
-          </>
-        )}
-      </Modal>
+      {/* On phones the hero scrolls away; keep the camera one thumb-tap away */}
+      <div className="fa-dock">
+        <button type="button" className="fa-cta" onClick={() => setCameraOpen(true)}>
+          <Camera size={20} />
+          Chụp ảnh tìm ảnh của bạn
+        </button>
+      </div>
+
+      <CameraModal
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onUse={(file) => {
+          setCameraOpen(false);
+          search(file);
+        }}
+      />
+
+      {lightboxAt !== null && (
+        <Lightbox
+          photos={shown}
+          index={lightboxAt}
+          onIndex={setLightboxAt}
+          onClose={() => setLightboxAt(null)}
+        />
+      )}
     </Theme>
   );
 }
