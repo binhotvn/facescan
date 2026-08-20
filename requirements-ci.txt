@@ -1,0 +1,8 @@
+# Runtime deps needed to import the app in CI, minus the heavy model stack.
+# Keep in sync with requirements.txt.
+opencv-python-headless>=4.9.0
+numpy>=1.26,<2.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
+tqdm>=4.66.0

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from . import db
-from .engine import detect_query_face, cosine_search
+from .engine import cosine_search, detect_query_face
 
 
 def search_image(query_path: Path, threshold: float = 0.35, db_path: Path = db.DB_PATH):

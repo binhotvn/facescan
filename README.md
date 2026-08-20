@@ -101,3 +101,24 @@ Deployment shape for a real event:
 - Put a reverse proxy (Caddy/nginx/Traefik) in front for TLS; the app itself is plain HTTP on :8000. Note the camera capture feature requires HTTPS on non-localhost origins.
 - Ingest speed on CPU is roughly 1–3 photos/sec/worker at det_size 1024. The DB file is portable — you can ingest on a beefy machine and ship `data/facescan.db` to the web server.
 - Privacy: you're storing biometric embeddings of attendees — check consent/GDPR requirements for your event, and delete `data/` after the event if required.
+
+## Tests & CI
+
+```bash
+pip install -r requirements-ci.txt -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+The suite stubs the face detector, so it runs without downloading the ~300MB
+InsightFace model (`requirements-ci.txt` is `requirements.txt` minus
+insightface/onnxruntime, with headless OpenCV).
+
+GitHub Actions (`.github/workflows/`):
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | push to `main`, PRs | ruff + pytest on Python 3.11/3.12, `npm ci && npm run build` for the Carbon frontend, Docker image build plus a `/healthz` container smoke test |
+| `docker-publish.yml` | push to `main`, `v*` tags | builds and pushes `ghcr.io/<owner>/<repo>` (`latest`, branch, `vX.Y.Z`, short-sha tags) using the repo's `GITHUB_TOKEN` |
+
+Dependabot keeps pip, npm, Docker, and action versions current (`.github/dependabot.yml`).

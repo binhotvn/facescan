@@ -10,12 +10,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 
 from facescan import db
 from facescan.engine import detect_query_face
-from facescan.index import FaceIndex, HAVE_FAISS
+from facescan.index import HAVE_FAISS, FaceIndex
 
 logging.basicConfig(level=logging.INFO)
 
