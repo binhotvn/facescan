@@ -130,7 +130,7 @@ $('searchBtn').onclick = async () => {
       $('msg').textContent = `Found you in ${data.matches.length} photo${data.matches.length > 1 ? 's' : ''}:`;
       $('results').innerHTML = data.matches.map(m =>
         `<a class="card" href="${m.url}" target="_blank">
-           <img src="${m.url}" loading="lazy">
+           <img src="${m.thumb || m.url}" loading="lazy">
            <span class="score">${Math.round(m.score * 100)}%</span>
          </a>`).join('');
     }

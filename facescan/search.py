@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from . import db
-from .engine import extract_faces, cosine_search
+from .engine import detect_query_face, cosine_search
 
 
 def search_image(query_path: Path, threshold: float = 0.35, db_path: Path = db.DB_PATH):
@@ -22,11 +22,9 @@ def search_image(query_path: Path, threshold: float = 0.35, db_path: Path = db.D
     img = cv2.imread(str(query_path))
     if img is None:
         raise ValueError(f"Cannot read image: {query_path}")
-    faces = extract_faces(img)
-    if not faces:
+    face = detect_query_face(img)
+    if face is None:
         raise ValueError("No face detected in the query photo.")
-    # Use the largest face in the query photo (the selfie subject)
-    face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
     return search_embedding(face.normed_embedding, threshold, db_path)
 
 

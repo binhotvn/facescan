@@ -30,6 +30,7 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")  # readers (web app) don't block the ingest writer
     conn.executescript(SCHEMA)
     return conn
 

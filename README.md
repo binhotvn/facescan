@@ -77,8 +77,20 @@ photos/        your event photos (gitignored)
 data/          SQLite index (gitignored)
 ```
 
-## Notes for large events
+## Production & scaling
 
-- ~10k photos with ~10 faces each = 100k embeddings ≈ 200MB in RAM as a numpy matrix; brute-force cosine search over that is still <100ms. Beyond ~1M faces, swap the numpy search in `engine.cosine_search` for FAISS.
-- Ingest speed on CPU is roughly 1–3 photos/sec at det_size 1024. Run it on the beefiest machine you have; the DB file is portable.
+Built in for scale:
+
+- **Cached in-memory index** — embeddings load from SQLite once at startup and auto-reload when the DB file changes (e.g. after a new ingest run). `POST /api/refresh` forces a reload; `GET /healthz` reports index size for load balancers / Docker healthchecks.
+- **FAISS acceleration** — if `faiss-cpu` is installed (the Docker image includes it), search transparently uses a FAISS inner-product index. Without it, brute-force numpy still handles ~1M faces in well under a second (~100k embeddings ≈ 200MB RAM).
+- **Parallel ingest** — `python -m facescan.ingest photos/ --workers 8` runs one model per CPU worker (~1GB RAM each). Ingest is incremental, so you can keep dropping photos in during the event and re-run it.
+- **WAL SQLite** — the web app keeps serving searches while an ingest is writing.
+- **Thumbnails** — the results grid serves cached 480px JPEG thumbnails (`data/thumbs/`), not full-resolution originals.
+- **Upload cap** — selfie uploads are limited to 15MB (`FACESCAN_MAX_UPLOAD_MB`).
+
+Deployment shape for a real event:
+
+- One box (8+ cores, 8GB RAM) comfortably handles a marathon-sized event: run ingest with `--workers N` as photographers upload, and the web app alongside it. CPU inference on the *query* selfie takes ~1s, so a single instance sustains roughly 1 search/sec; scale out by running more containers behind a load balancer sharing the same read-only `data/` + `photos/` volume.
+- Put a reverse proxy (Caddy/nginx/Traefik) in front for TLS; the app itself is plain HTTP on :8000. Note the camera capture feature requires HTTPS on non-localhost origins.
+- Ingest speed on CPU is roughly 1–3 photos/sec/worker at det_size 1024. The DB file is portable — you can ingest on a beefy machine and ship `data/facescan.db` to the web server.
 - Privacy: you're storing biometric embeddings of attendees — check consent/GDPR requirements for your event, and delete `data/` after the event if required.
