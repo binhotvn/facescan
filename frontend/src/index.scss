@@ -2,9 +2,44 @@
   $use-akamai-cdn: true
 );
 
+// FF Agency brand red, sampled from the master logo (LOGO FF-12.png)
+$ff-red: #a13122;
+
 html,
 body {
   background: #161616; // Carbon g100 $background
+}
+
+// Recolour Carbon's interactive tokens to the brand red instead of IBM blue.
+// The <Theme> wrapper re-declares these on .cds--g100, so match it too.
+:root,
+.cds--g100 {
+  --cds-button-primary: #{$ff-red};
+  --cds-button-primary-hover: #b93b28;
+  --cds-button-primary-active: #7d2418;
+  --cds-link-primary: #e8705c;
+  --cds-link-primary-hover: #f08a78;
+  --cds-focus: #f08a78;
+  --cds-interactive: #{$ff-red};
+  --cds-border-interactive: #{$ff-red};
+}
+
+// HeaderName wraps its children in a plain span, which stacks the block-level
+// mark above the wordmark; make that wrapper a flex row.
+.cds--header__name > span {
+  display: flex;
+  align-items: center;
+}
+
+.fa-logo {
+  block-size: 1.375rem;
+  display: block;
+  margin-inline-end: 0.625rem;
+}
+
+.fa-wordmark {
+  font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
 #root {

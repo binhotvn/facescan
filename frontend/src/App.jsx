@@ -107,8 +107,9 @@ export default function App() {
   return (
     <Theme theme="g100">
       <Header aria-label="FF Agency">
-        <HeaderName href="/" prefix="FF">
-          Agency
+        <HeaderName href="/" prefix="">
+          <img className="fa-logo" src="/ff-mark.png" alt="" aria-hidden="true" />
+          <span className="fa-wordmark">FF AGENCY</span>
         </HeaderName>
       </Header>
 

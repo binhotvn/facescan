@@ -166,3 +166,13 @@ def photo(path: str, thumb: bool = False):
 if (_DIST / "assets").is_dir():
     from fastapi.staticfiles import StaticFiles
     app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+
+# Vite copies frontend/public/* (logo, favicons) to the root of dist. Registered
+# last so it never shadows /api, /photo or /healthz.
+@app.get("/{filename}")
+def dist_root_file(filename: str):
+    f = _DIST / filename
+    if "/" in filename or not f.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(f)
