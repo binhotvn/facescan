@@ -157,25 +157,50 @@ Files land in `photos/uploads/` under a timestamped, sanitised name, are indexed
 immediately, and appear in the gallery on the next poll. Bad files are reported
 per-file without failing the batch.
 
-### `upload.py` — push a whole folder
+### `upload.py`: push a whole folder
 
-`upload.py` walks a folder **recursively** and sends everything to that endpoint:
+`upload.py` walks a folder recursively and sends everything to that endpoint.
+It needs no third-party packages and runs on Python 3.8+, so it works on
+whatever laptop the photos are sitting on.
 
 ```bash
-export FACESCAN_UPLOAD_TOKEN=...            # same token the server has
 python upload.py ./uploads                  # ./uploads and every subfolder
-python upload.py ./uploads --url https://photos.example.com
+python upload.py ./uploads --watch          # keep running, send new drops
+python upload.py ./uploads --workers 4      # parallel uploads
 python upload.py ./uploads --dry-run        # list what would be sent
-python upload.py ./uploads --force          # re-send everything
+python upload.py ./uploads --force          # ignore local state, re-send
 ```
 
-Re-running only sends what is new or changed — `.facescan-upload.json` in the
-folder records each file's mtime and size, and is checkpointed after every
-batch, so an interrupted run resumes where it stopped. Requests are batched by
-count (`--batch`, default 10) and by total bytes, network errors retry with
-backoff, and a file the server rejects is left unmarked so the next run retries
-it. Bulk backfills of photos already on the server are still faster through the
-CLI (`python -m facescan.ingest photos/ --workers 8`).
+**Settings.** `--url` and `--token` come from the environment, or from a `.env`
+file in the current directory (the same file compose uses). Nothing is
+hardcoded, so a token never lands in git:
+
+```bash
+# .env  (gitignored)
+FACESCAN_URL=https://photos.example.com
+FACESCAN_UPLOAD_TOKEN=...
+```
+
+**Duplicates.** Photos are matched by content, not by name. A copy under another
+name is recognised locally and never leaves the machine, and the server refuses
+content it has already indexed (it stores a SHA-256 per photo), so two people
+running the script against the same folder cannot double up the gallery.
+
+**Watch mode.** `--watch` keeps the process running and uploads files as they
+are dropped into the folder, waiting until a file has stopped growing so a
+half-copied photo is never sent. The live view shows progress, throughput,
+counts and recent activity.
+
+**Speed.** Startup does not hash the folder: it filters on mtime and size, then
+hashes each batch inside the worker that uploads it, so transfers begin at once
+and hashing overlaps the network. Batches are capped by count (`--batch`) and by
+total bytes; network errors retry with backoff; 401/503/413 stop with an
+explanation. `.facescan-upload.json` is written atomically after every batch, so
+an interrupted run resumes where it stopped, and a file the server rejects stays
+unmarked for the next run.
+
+Bulk backfills of photos already on the server are still faster through the CLI
+(`python -m facescan.ingest photos/ --workers 8`).
 
 ## Running the published image
 

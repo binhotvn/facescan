@@ -10,7 +10,12 @@ again, and the server refuses content it has already indexed. Re-running after
 an interrupted session picks up exactly where it stopped.
 
 Token: --token, or $FACESCAN_UPLOAD_TOKEN.
+
+Runs on Python 3.8+ with no third-party packages: it has to work on whatever
+laptop the photos are sitting on.
 """
+from __future__ import annotations  # so "str | None" parses on Python < 3.10
+
 import argparse
 import hashlib
 import json
@@ -353,25 +358,51 @@ class Uploader:
         self._in_flight: set[str] = set()
 
     def plan(self, paths):
-        """Hash and filter: returns the files that actually need sending."""
+        """Cheap pass: drop files this folder has already sent.
+
+        Only mtime and size are consulted here, never file contents. Hashing
+        hundreds of photos up front is what made startup feel frozen; content
+        hashing now happens per batch inside the workers, overlapped with the
+        network.
+        """
         todo = []
         for p in paths:
-            digest = self.state.known_hash(p) or file_hash(p)
-            if self.state.seen(digest):
-                self.state.note_path(p, digest)
+            if self.state.known_hash(p):
                 self.stats.add(skipped=1)
-                continue
-            with self._seen_lock:
-                if digest in self._in_flight:  # same content twice in one run
-                    self.stats.add(skipped=1)
-                    self.ui.log(f"skip duplicate content: {p.name}", "dim")
-                    continue
-                self._in_flight.add(digest)
-            todo.append((p, digest))
+            else:
+                todo.append(p)
         return todo
 
-    def send(self, items):
-        """Upload one batch of (path, digest) with retries. Returns nothing."""
+    def _hash_batch(self, paths):
+        """Hash a batch and drop anything already sent. Returns (path, digest)."""
+        items = []
+        for p in paths:
+            try:
+                digest = file_hash(p)
+            except OSError as e:
+                self.stats.add(failed=1)
+                self.ui.log(f"{p.name}: {e}", "error")
+                continue
+            if self.state.seen(digest):
+                self.state.note_path(p, digest)
+                self.stats.add(skipped=1, queued=-1)
+                continue
+            with self._seen_lock:
+                if digest in self._in_flight:  # the same photo twice in one run
+                    self.stats.add(skipped=1, queued=-1)
+                    self.ui.log(f"bỏ qua bản trùng: {p.name}", "dim")
+                    continue
+                self._in_flight.add(digest)
+            items.append((p, digest))
+        return items
+
+    def send(self, batch_paths):
+        """Hash, then upload one batch with retries."""
+        if self.fatal:
+            return
+        items = self._hash_batch(batch_paths)
+        if not items:
+            return
         paths = [p for p, _ in items]
         size = sum(p.stat().st_size for p in paths)
         for attempt in range(self.args.retries + 1):
@@ -419,10 +450,10 @@ class Uploader:
         if not todo:
             return True
         self.stats.add(queued=len(todo))
-        groups = list(batches([p for p, _ in todo], self.args.batch))
-        digest_of = dict(todo)
+        self.ui.set_status(f"sending {len(todo)} photo(s), {self.args.workers} at a time")
+        groups = list(batches(todo, self.args.batch))
         with ThreadPoolExecutor(max_workers=self.args.workers) as pool:
-            futures = [pool.submit(self.send, [(p, digest_of[p]) for p in g]) for g in groups]
+            futures = [pool.submit(self.send, g) for g in groups]
             for f in futures:
                 f.result()
         self.state.save()
@@ -455,15 +486,42 @@ def watch(args, state: State, stats: Stats, ui, uploader: Uploader):
 # --------------------------------------------------------------------------
 # cli
 # --------------------------------------------------------------------------
-def build_parser():
+def load_dotenv(*candidates: Path) -> dict:
+    """Read KEY=value lines from the first .env found.
+
+    Keeps the token out of the source file (and out of git) while still
+    allowing a bare `python upload.py` with no flags.
+    """
+    for path in candidates:
+        try:
+            text = path.read_text()
+        except (FileNotFoundError, IsADirectoryError, OSError):
+            continue
+        values = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip("'\"")
+        return values
+    return {}
+
+
+def build_parser(env: dict | None = None):
+    env = env if env is not None else {}
+
+    def setting(name: str, fallback: str = "") -> str:
+        return os.environ.get(name) or env.get(name, "") or fallback
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path, nargs="?", default=Path("uploads"),
                     help="folder of photos, searched recursively (default: ./uploads)")
-    ap.add_argument("--url", default=os.environ.get("FACESCAN_URL", "http://localhost:8000"),
-                    help="server base URL (default: $FACESCAN_URL or http://localhost:8000)")
-    ap.add_argument("--token", default=os.environ.get("FACESCAN_UPLOAD_TOKEN", ""),
-                    help="upload token (default: $FACESCAN_UPLOAD_TOKEN)")
+    ap.add_argument("--url", default=setting("FACESCAN_URL", "http://localhost:8000"),
+                    help="server base URL ($FACESCAN_URL or .env, default http://localhost:8000)")
+    ap.add_argument("--token", default=setting("FACESCAN_UPLOAD_TOKEN"),
+                    help="upload token ($FACESCAN_UPLOAD_TOKEN or .env)")
     ap.add_argument("--watch", action="store_true",
                     help="keep running and upload files as they are dropped in")
     ap.add_argument("--interval", type=float, default=WATCH_INTERVAL,
@@ -480,7 +538,8 @@ def build_parser():
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    here = Path(__file__).resolve().parent
+    args = build_parser(load_dotenv(Path.cwd() / ".env", here / ".env")).parse_args(argv)
 
     if not args.folder.is_dir():
         print(f"No such folder: {args.folder}", file=sys.stderr)
@@ -497,7 +556,7 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         found = list(iter_images(args.folder))
-        todo = [p for p in found if not state.seen(state.known_hash(p) or file_hash(p))]
+        todo = [p for p in found if not state.known_hash(p)]
         print(f"{len(found)} images, {len(todo)} to send")
         for p in todo:
             print("  would send", p)

@@ -43,6 +43,23 @@ jobs:
       - name: Test
         run: pytest -q
 
+  upload-client:
+    # upload.py runs on whatever laptop the photos are on, so it must not need
+    # a modern Python: "str | None" at class scope broke it on 3.9.
+    name: upload.py on Python 3.9
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - run: pip install pytest
+
+      - run: python upload.py --help
+      - run: pytest -q tests/test_upload_script.py
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

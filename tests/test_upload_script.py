@@ -14,6 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import upload  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    """The developer's shell often exports these; tests must not depend on it."""
+    monkeypatch.delenv("FACESCAN_UPLOAD_TOKEN", raising=False)
+    monkeypatch.delenv("FACESCAN_URL", raising=False)
+
+
 def _img(p: Path, content: bytes = b"aaa") -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"\xff\xd8\xff" + content)
@@ -130,6 +137,24 @@ def _run(tmp_path, *extra):
     return upload.main([str(tmp_path), "--token", "t", "--plain", *extra])
 
 
+def test_scan_does_not_hash_before_uploading(tmp_path, server, monkeypatch):
+    """Startup must not stall: hashing happens per batch, inside the workers."""
+    for i in range(5):
+        _img(tmp_path / f"p{i}.jpg", bytes([i]) * 10)
+    hashed_before_first_post = []
+    real_hash = upload.file_hash
+
+    def counting_hash(p):
+        hashed_before_first_post.append(len(server))
+        return real_hash(p)
+
+    monkeypatch.setattr(upload, "file_hash", counting_hash)
+
+    assert _run(tmp_path, "--workers", "1", "--batch", "1") == 0
+    # the second batch is hashed only after the first request went out
+    assert max(hashed_before_first_post) > 0
+
+
 def test_uploads_everything_then_resumes(tmp_path, server):
     _img(tmp_path / "a.jpg", b"one")
     _img(tmp_path / "day2" / "b.jpg", b"two")
@@ -178,10 +203,40 @@ def test_dry_run_sends_nothing(tmp_path, server, capsys):
     assert "would send" in capsys.readouterr().out
 
 
-def test_requires_a_token(tmp_path, capsys):
+def test_requires_a_token(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no .env in reach
     _img(tmp_path / "a.jpg")
     assert upload.main([str(tmp_path)]) == 2
     assert "token" in capsys.readouterr().err.lower()
+
+
+def test_dotenv_supplies_the_token_and_url(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        "# comment\nFACESCAN_URL=https://photos.example.com\n"
+        'FACESCAN_UPLOAD_TOKEN="s3cret"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+
+    args = upload.build_parser(upload.load_dotenv(tmp_path / ".env")).parse_args([])
+
+    assert args.url == "https://photos.example.com"
+    assert args.token == "s3cret"  # quotes stripped
+
+
+def test_environment_beats_dotenv(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("FACESCAN_UPLOAD_TOKEN=from-file\n")
+    monkeypatch.setenv("FACESCAN_UPLOAD_TOKEN", "from-env")
+
+    args = upload.build_parser(upload.load_dotenv(tmp_path / ".env")).parse_args([])
+
+    assert args.token == "from-env"
+
+
+def test_no_token_is_hardcoded_in_the_source():
+    """A default token in the file would ship a live credential to git."""
+    source = Path(upload.__file__).read_text()
+    line = next(ln for ln in source.splitlines() if '"--token"' in ln)
+    assert "setting(" in line and "default=\"" not in line
 
 
 def test_rejects_a_missing_folder(tmp_path):
