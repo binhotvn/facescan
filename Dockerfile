@@ -24,7 +24,9 @@ ARG FACESCAN_MODEL=buffalo_l
 ENV FACESCAN_MODEL=${FACESCAN_MODEL}
 COPY facescan/ facescan/
 COPY scripts/ scripts/
-RUN python scripts/prefetch_model.py
+# PYTHONPATH: running a script puts scripts/ on sys.path, not /app, so the
+# script cannot import facescan without it.
+RUN PYTHONPATH=/app python scripts/prefetch_model.py
 
 COPY static/ static/
 COPY app.py .

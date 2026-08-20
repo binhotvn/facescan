@@ -1,0 +1,7 @@
+# Overlay for building from source instead of pulling the published image.
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  facescan:
+    build: .
+    image: facescan:local
+    pull_policy: build

@@ -1,9 +1,14 @@
+# Runs the published image from GitHub Packages (GHCR).
+#   docker compose up -d                     # latest
+#   FACESCAN_TAG=1.2.0 docker compose up -d  # a specific release
+#
+# To build from this checkout instead:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+
 services:
   facescan:
-    # Build locally, or swap for the image CI publishes:
-    #   image: ghcr.io/binhotvn/facescan:latest
-    build: .
-    image: facescan:local
+    image: ghcr.io/binhotvn/facescan:${FACESCAN_TAG:-latest}
+    pull_policy: always
     ports:
       - "8000:8000"
     env_file:
@@ -14,7 +19,7 @@ services:
       FACESCAN_THUMBS: /app/data/thumbs
       FACESCAN_WARMUP: "1"
     volumes:
-      - ./photos:/app/photos                   # event photos (also where uploads land)
+      - ./photos:/app/photos                   # event photos (uploads land here too)
       - ./data:/app/data                       # face index + thumbnail cache
       - insightface-models:/root/.insightface  # model cache; seeded from the image
     healthcheck:
