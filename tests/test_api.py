@@ -1,5 +1,6 @@
 """End-to-end API tests with the face detector stubbed out (no model download)."""
 import io
+import time
 import zipfile
 from types import SimpleNamespace
 
@@ -269,8 +270,10 @@ def test_download_flag_sets_attachment(client, photos_dir):
 
 @pytest.fixture
 def upload_ready(monkeypatch, photos_dir):
-    """Enable uploads and stub the face pass (no model in CI)."""
+    """Enable uploads, stub the face pass (no model in CI), isolate the worker."""
     monkeypatch.setattr(app_module, "UPLOAD_TOKEN", "s3cret")
+    worker = app_module.Indexer()
+    monkeypatch.setattr(app_module, "indexer", worker)
 
     def fake_process(path):
         img = cv2.imread(path)
@@ -283,7 +286,8 @@ def upload_ready(monkeypatch, photos_dir):
         }
 
     monkeypatch.setattr(app_module.ingest, "_process_one", fake_process)
-    return photos_dir / "uploads"
+    yield photos_dir / "uploads"
+    worker.stop()  # never let a worker outlive the patched model stub
 
 
 def _upload(client, files, token="s3cret"):
@@ -291,35 +295,45 @@ def _upload(client, files, token="s3cret"):
     return client.post("/api/upload", files=files, headers=headers)
 
 
-def test_upload_indexes_the_photo(client, upload_ready):
+def _indexed(client, timeout=5.0):
+    """Wait for the background worker to drain, then return fresh stats."""
+    deadline = time.monotonic() + timeout
+    while app_module.indexer.pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+    app_module.indexer.q.join()
+    return client.get("/api/stats").json()
+
+
+def test_upload_accepts_then_indexes_in_the_background(client, upload_ready):
     r = _upload(client, [("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))])
 
     assert r.status_code == 200
     body = r.json()
-    assert (body["indexed"], body["faces"]) == (1, 1)
-    assert body["photos"][0]["ok"] is True
+    assert body["accepted"] == 1
+    assert body["photos"][0]["queued"] is True
     assert list(upload_ready.iterdir())  # written under photos/uploads
 
-    gallery = client.get("/api/photos").json()
-    assert gallery["total"] == 1
-    assert client.get("/api/stats").json()["faces"] == 1
+    # visible in the gallery immediately, faces arrive once the worker runs
+    assert client.get("/api/photos").json()["total"] == 1
+    assert _indexed(client)["faces"] == 1
 
 
 def test_upload_accepts_a_batch(client, upload_ready):
     files = [("files", (f"p{i}.jpg", data, "image/jpeg"))
              for i, data in enumerate(_distinct_jpegs(3))]
-    assert _upload(client, files).json()["indexed"] == 3
+    assert _upload(client, files).json()["accepted"] == 3
     assert client.get("/api/photos").json()["total"] == 3
+    assert _indexed(client)["faces"] == 3
 
 
 def test_upload_skips_content_already_indexed(client, upload_ready):
     photo = ("files", ("race.jpg", _jpeg_bytes(), "image/jpeg"))
-    assert _upload(client, [photo]).json()["indexed"] == 1
+    assert _upload(client, [photo]).json()["accepted"] == 1
 
     # same bytes, different filename
     again = _upload(client, [("files", ("copy.jpg", _jpeg_bytes(), "image/jpeg"))]).json()
 
-    assert again["indexed"] == 0
+    assert again["accepted"] == 0
     assert again["duplicates"] == 1
     assert again["photos"][0]["duplicate"] is True
     assert client.get("/api/photos").json()["total"] == 1  # gallery shows it once
@@ -332,7 +346,7 @@ def test_upload_deduplicates_within_one_batch(client, upload_ready):
 
     body = _upload(client, files).json()
 
-    assert (body["indexed"], body["duplicates"]) == (1, 2)
+    assert (body["accepted"], body["duplicates"]) == (1, 2)
     assert client.get("/api/photos").json()["total"] == 1
 
 
@@ -341,7 +355,7 @@ def test_upload_still_indexes_different_photos(client, upload_ready):
         ("files", ("a.jpg", _jpeg_bytes(64, 64), "image/jpeg")),
         ("files", ("b.jpg", _jpeg_bytes(48, 96), "image/jpeg")),
     ]
-    assert _upload(client, files).json()["indexed"] == 2
+    assert _upload(client, files).json()["accepted"] == 2
 
 
 def test_upload_requires_the_token(client, upload_ready):
@@ -364,14 +378,14 @@ def test_upload_reports_unreadable_files_without_failing_the_batch(client, uploa
     ]
     body = _upload(client, files).json()
 
-    assert body["indexed"] == 1
+    assert body["accepted"] == 1
     assert [p["ok"] for p in body["photos"]] == [True, False]
 
 
 def test_upload_rejects_oversized_files(client, upload_ready, monkeypatch):
     monkeypatch.setattr(app_module, "MAX_PHOTO_BYTES", 10)
     body = _upload(client, [("files", ("big.jpg", _jpeg_bytes(), "image/jpeg"))]).json()
-    assert body["indexed"] == 0
+    assert body["accepted"] == 0
     assert body["photos"][0]["error"]
 
 
@@ -385,7 +399,7 @@ def test_upload_neutralizes_hostile_filenames(client, upload_ready):
     files = [("files", ("../../../etc/passwd.jpg", _jpeg_bytes(), "image/jpeg"))]
     body = _upload(client, files).json()
 
-    assert body["indexed"] == 1
+    assert body["accepted"] == 1
     written = list(upload_ready.iterdir())
     assert len(written) == 1
     assert ".." not in written[0].name
@@ -396,7 +410,7 @@ def test_upload_names_do_not_collide(client, upload_ready):
     """Two different photos that happen to share a filename."""
     files = [("files", ("same.jpg", data, "image/jpeg")) for data in _distinct_jpegs(2)]
 
-    assert _upload(client, files).json()["indexed"] == 2
+    assert _upload(client, files).json()["accepted"] == 2
     assert len(list(upload_ready.iterdir())) == 2  # both kept, distinct names
 
 

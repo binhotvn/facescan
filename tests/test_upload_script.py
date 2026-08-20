@@ -121,11 +121,11 @@ def server(monkeypatch):
                 dup = data in seen
                 seen.add(data)
             photos.append({"filename": f.name, "ok": True, "duplicate": dup,
-                           "faces": 0 if dup else 3})
+                           "queued": not dup})
         return {
-            "indexed": sum(0 if p["duplicate"] else 1 for p in photos),
-            "faces": sum(p["faces"] for p in photos),
+            "accepted": sum(0 if p["duplicate"] else 1 for p in photos),
             "duplicates": sum(p["duplicate"] for p in photos),
+            "pending": 0,
             "photos": photos,
         }
 
@@ -248,7 +248,7 @@ def test_failed_files_are_not_marked_uploaded(tmp_path, monkeypatch):
     _img(tmp_path / "bad.jpg", b"b")
 
     def fake_post(url, token, files, timeout=900):
-        return {"indexed": 1, "faces": 1, "duplicates": 0, "photos": [
+        return {"accepted": 1, "duplicates": 0, "pending": 0, "photos": [
             {"filename": f.name, "ok": f.name == "good.jpg", "error": "Không đọc được ảnh."}
             for f in files]}
 
@@ -257,6 +257,64 @@ def test_failed_files_are_not_marked_uploaded(tmp_path, monkeypatch):
     assert _run(tmp_path) == 1
     state = json.loads((tmp_path / upload.STATE_NAME).read_text())
     assert [Path(v).name for v in state["hashes"].values()] == ["good.jpg"]
+
+
+def test_a_gateway_timeout_splits_the_batch_and_keeps_going(tmp_path, monkeypatch):
+    """A 504 from the proxy used to kill the whole run."""
+    import urllib.error
+    for i in range(4):
+        _img(tmp_path / f"p{i}.jpg", bytes([i]) * 10)
+    seen = []
+
+    def fake_post(url, token, files, timeout=900):
+        seen.append(len(files))
+        if len(files) > 1:  # too slow for the gateway
+            raise urllib.error.HTTPError(url, 504, "Gateway Timeout", {}, None)
+        return {"accepted": 1, "duplicates": 0, "pending": 1,
+                "photos": [{"filename": f.name, "ok": True, "queued": True} for f in files]}
+
+    monkeypatch.setattr(upload, "post_batch", fake_post)
+    monkeypatch.setattr(upload.time, "sleep", lambda *_: None)
+
+    assert _run(tmp_path, "--batch", "4", "--workers", "1") == 0
+    assert max(seen) == 4 and min(seen) == 1  # split down to single photos
+    state = json.loads((tmp_path / upload.STATE_NAME).read_text())
+    assert len(state["hashes"]) == 4  # every photo eventually landed
+
+
+def test_a_transient_5xx_is_retried_not_fatal(tmp_path, monkeypatch):
+    import urllib.error
+    _img(tmp_path / "a.jpg")
+    calls = []
+
+    def fake_post(url, token, files, timeout=900):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)
+        return {"accepted": 1, "duplicates": 0, "pending": 0,
+                "photos": [{"filename": f.name, "ok": True} for f in files]}
+
+    monkeypatch.setattr(upload, "post_batch", fake_post)
+    monkeypatch.setattr(upload.time, "sleep", lambda *_: None)
+
+    assert _run(tmp_path) == 0
+    assert len(calls) == 2
+
+
+def test_uploads_disabled_is_still_fatal(tmp_path, monkeypatch):
+    """Our own 503 carries a detail body; a proxy 503 does not."""
+    import io
+    import urllib.error
+    _img(tmp_path / "a.jpg")
+
+    def fake_post(url, token, files, timeout=900):
+        body = io.BytesIO(json.dumps({"detail": "Tải ảnh lên chưa được bật"}).encode())
+        raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, body)
+
+    monkeypatch.setattr(upload, "post_batch", fake_post)
+    monkeypatch.setattr(upload.time, "sleep", lambda *_: None)
+
+    assert _run(tmp_path) == 1
 
 
 def test_a_fatal_server_error_stops_immediately(tmp_path, monkeypatch):
@@ -283,8 +341,8 @@ def test_network_errors_retry_then_succeed(tmp_path, monkeypatch):
         attempts.append(1)
         if len(attempts) == 1:
             raise urllib.error.URLError("connection reset")
-        return {"indexed": 1, "faces": 2, "duplicates": 0,
-                "photos": [{"filename": f.name, "ok": True, "faces": 2} for f in files]}
+        return {"accepted": 1, "duplicates": 0, "pending": 0,
+                "photos": [{"filename": f.name, "ok": True} for f in files]}
 
     monkeypatch.setattr(upload, "post_batch", flaky)
     monkeypatch.setattr(upload.time, "sleep", lambda *_: None)

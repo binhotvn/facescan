@@ -11,8 +11,12 @@ def get_engine():
     global _app
     if _app is None:
         from insightface.app import FaceAnalysis
+        # Only detection and recognition. The pack also ships landmark_3d_68,
+        # landmark_2d_106 and genderage, which run on every face and cost about
+        # 40% of the total; nothing here reads their output.
         _app = FaceAnalysis(
             name=os.environ.get("FACESCAN_MODEL", "buffalo_l"),
+            allowed_modules=["detection", "recognition"],
             providers=["CPUExecutionProvider"],
         )
         det_size = int(os.environ.get("FACESCAN_DET_SIZE", "1024"))

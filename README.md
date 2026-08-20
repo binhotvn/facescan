@@ -136,8 +136,16 @@ Face detection runs on a copy capped at `FACESCAN_MAX_EDGE` (2560px), and query
 selfies at `FACESCAN_QUERY_MAX_EDGE` (1600px). Measured on 3840px event photos,
 the cap detects exactly the same faces with embeddings at 0.99+ cosine
 similarity to full-resolution ones, while cutting decoded image memory by about
-two thirds. It is not a speed fix: cost is dominated by recognition per face
-(about 170ms/face on CPU), not by resolution.
+two thirds.
+
+Resolution is not what makes scanning slow. On a 3840px photo with 11 faces:
+decode 45ms, detection 289ms, recognition 929ms. The pack also ships
+`landmark_3d_68`, `landmark_2d_106` and `genderage`, which ran on every face and
+cost another ~780ms for output nothing here reads; loading only detection and
+recognition **halves scan time** (2.00s to 0.96s per photo) and produces
+byte-identical embeddings, so no re-index is needed. Beyond that the levers are
+`--workers` (one model per process) and `FACESCAN_DET_SIZE` (640 instead of 1024
+is about 30% faster but finds fewer small faces in crowds).
 
 ## Pushing photos in
 
@@ -153,9 +161,13 @@ curl -X POST http://localhost:8000/api/upload \
   -F "files=@race-001.jpg" -F "files=@race-002.jpg"
 ```
 
-Files land in `photos/uploads/` under a timestamped, sanitised name, are indexed
-immediately, and appear in the gallery on the next poll. Bad files are reported
-per-file without failing the batch.
+Files land in `photos/uploads/` under a timestamped, sanitised name and appear
+in the gallery straight away. **Face indexing runs on a background worker**, so
+the request returns in seconds: a batch of crowd photos takes minutes to index
+and would otherwise hit a reverse proxy's gateway timeout (504). `pending` in
+`/api/stats` and `/healthz` reports how many photos are still queued. Bad files
+are reported per-file without failing the batch, and content already indexed is
+refused as a duplicate.
 
 ### `upload.py`: push a whole folder
 

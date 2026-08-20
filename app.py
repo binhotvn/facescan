@@ -6,6 +6,7 @@ import hashlib
 import io
 import logging
 import os
+import queue
 import re
 import secrets
 import threading
@@ -24,6 +25,7 @@ from facescan.engine import QUERY_MAX_EDGE, detect_query_face, downscale
 from facescan.index import HAVE_FAISS, FaceIndex
 
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("facescan.app")
 
 PHOTOS_DIR = Path(os.environ.get("FACESCAN_PHOTOS", "photos")).resolve()
 THUMBS_DIR = Path(os.environ.get("FACESCAN_THUMBS", "data/thumbs")).resolve()
@@ -49,7 +51,7 @@ EVENT_NAME = os.environ.get("FACESCAN_EVENT_NAME", "Ảnh sự kiện FF Agency"
 EVENT_DATE = os.environ.get("FACESCAN_EVENT_DATE", "")
 MAX_ZIP_PHOTOS = 200
 
-app = FastAPI(title="FF Agency — FaceScan")
+app = FastAPI(title="FF Agency FaceScan")
 index = FaceIndex()
 # InsightFace sessions are not thread-safe; serialize inference across requests
 _infer_lock = threading.Lock()
@@ -89,7 +91,8 @@ def home():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "faces_indexed": index.size, "faiss": HAVE_FAISS}
+    return {"ok": True, "faces_indexed": index.size, "faiss": HAVE_FAISS,
+            "pending": indexer.pending}
 
 
 @app.get("/api/stats")
@@ -97,7 +100,8 @@ def api_stats():
     conn = db.connect()
     s = db.stats(conn)
     conn.close()
-    return {**s, "event": {"name": EVENT_NAME, "date": EVENT_DATE}}
+    return {**s, "pending": indexer.pending,
+            "event": {"name": EVENT_NAME, "date": EVENT_DATE}}
 
 
 def _photo_urls(path: str) -> dict:
@@ -254,14 +258,90 @@ def _upload_name(original: str | None) -> str:
     return f"{ts}-{secrets.token_hex(4)}-{stem}"
 
 
+_STOP = object()  # sentinel that ends the indexer thread
+
+
+class Indexer:
+    """Runs face detection off the request thread.
+
+    A crowd photo holds 40+ faces and costs seconds to index. Doing that inside
+    the upload request pushes it past any reverse proxy's gateway timeout (the
+    504s that killed a 481-photo run), so uploads are accepted, recorded, and
+    indexed here afterwards.
+    """
+
+    def __init__(self):
+        self.q: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def pending(self) -> int:
+        return self.q.qsize()
+
+    def submit(self, path: Path, digest: str):
+        self.q.put((path, digest))
+        self._ensure_running()
+
+    def stop(self, timeout: float = 5.0):
+        """Drain, then shut the worker down (used by tests and shutdown)."""
+        thread = self._thread
+        if thread and thread.is_alive():
+            self.q.put(_STOP)
+            thread.join(timeout)
+        self._thread = None
+
+    def _ensure_running(self):
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, name="indexer", daemon=True)
+            self._thread.start()
+
+    def _run(self):
+        conn = db.connect()
+        try:
+            while True:
+                try:
+                    item = self.q.get(timeout=30)
+                except queue.Empty:
+                    return  # idle: exit, a later upload starts a new thread
+                if item is _STOP:
+                    self.q.task_done()
+                    return
+                path, digest = item
+                try:
+                    with _infer_lock:  # the model is not thread-safe
+                        result = ingest._process_one(str(path))
+                    if result is None:
+                        log.warning("indexer could not read %s", path)
+                        continue
+                    result["sha256"] = digest
+                    faces = ingest._store(conn, result, path.stat().st_mtime)
+                    log.info("indexed %s (%d faces, %d queued)", path.name, faces, self.q.qsize())
+                except Exception:  # noqa: BLE001 - one bad photo must not kill the worker
+                    log.exception("indexing failed for %s", path)
+                finally:
+                    self.q.task_done()
+                if self.q.empty():
+                    index.refresh(force=True)
+        finally:
+            conn.close()
+
+
+indexer = Indexer()
+
+
 @app.post("/api/upload")
 def api_upload(
     files: list[UploadFile] = File(...),
     x_upload_token: str | None = Header(default=None),
 ):
-    """Photographers push event photos in; each one is indexed before returning.
+    """Photographers push event photos in.
 
-    Guarded by FACESCAN_UPLOAD_TOKEN — see _require_upload_token.
+    Files are validated, de-duplicated and stored before the response; face
+    indexing happens on a background worker, so a batch of crowd photos cannot
+    time out the request. Guarded by FACESCAN_UPLOAD_TOKEN.
     """
     _require_upload_token(x_upload_token)
     if not files:
@@ -272,7 +352,7 @@ def api_upload(
     dest_dir = PHOTOS_DIR / UPLOAD_SUBDIR
     dest_dir.mkdir(parents=True, exist_ok=True)
     conn = db.connect()
-    results, indexed, total_faces, duplicates = [], 0, 0, 0
+    results, accepted, duplicates = [], 0, 0
 
     try:
         for f in files:
@@ -280,9 +360,11 @@ def api_upload(
             if len(data) > MAX_PHOTO_BYTES:
                 results.append({"filename": f.filename, "ok": False, "error": "Ảnh quá lớn."})
                 continue
-            if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
                 results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
                 continue
+            height, width = img.shape[:2]
 
             # Same bytes already indexed (re-sent, or the same shot filed under
             # two names): keep the copy on disk, do not index it twice.
@@ -296,28 +378,22 @@ def api_upload(
 
             dest = dest_dir / _upload_name(f.filename)
             dest.write_bytes(data)
-            with _infer_lock:  # the model is not thread-safe
-                result = ingest._process_one(str(dest))
-            if result is None:
-                dest.unlink(missing_ok=True)
-                results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
-                continue
-
-            result["sha256"] = digest
-            faces = ingest._store(conn, result, dest.stat().st_mtime)
-            indexed += 1
-            total_faces += faces
+            # Recorded now, with its hash, so a re-run is recognised as a
+            # duplicate even before the background worker reaches it.
+            db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
+            conn.commit()
+            indexer.submit(dest, digest)
+            accepted += 1
             results.append(
-                dict(_photo_urls(str(dest)), filename=f.filename, ok=True, faces=faces)
+                dict(_photo_urls(str(dest)), filename=f.filename, ok=True, queued=True)
             )
     finally:
         conn.close()
 
-    index.refresh(force=True)
     return {
-        "indexed": indexed,
-        "faces": total_faces,
+        "accepted": accepted,
         "duplicates": duplicates,
+        "pending": indexer.pending,
         "photos": results,
     }
 

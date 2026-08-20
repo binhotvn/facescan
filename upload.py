@@ -164,21 +164,35 @@ def post_batch(url: str, token: str, files, timeout: int = 900) -> dict:
         return json.load(r)
 
 
-class Fatal(Exception):
-    """Server said something a retry will not fix."""
+# 5xx and friends come from the proxy in front of the server (a slow batch
+# hitting a gateway timeout, a restart, rate limiting). They are worth another
+# attempt; a rejected token or an oversized batch is not.
+RETRY_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 def explain(err: urllib.error.HTTPError) -> str:
     if err.code == 401:
         return "Sai mã tải lên (401). Check --token / $FACESCAN_UPLOAD_TOKEN."
-    if err.code == 503:
-        return "Server has uploads disabled (503). Set FACESCAN_UPLOAD_TOKEN there."
     if err.code == 413:
         return "Batch too large (413). Try a smaller --batch."
+    detail = ""
     try:
-        return f"HTTP {err.code}: {json.load(err).get('detail', '')}"
+        detail = json.load(err).get("detail", "")
     except Exception:  # noqa: BLE001 - the error body is not always JSON
-        return f"HTTP {err.code}"
+        pass
+    if err.code == 503 and detail:
+        return f"Server has uploads disabled (503): {detail}"
+    return f"HTTP {err.code}{': ' + detail if detail else ''}"
+
+
+def is_fatal(err: urllib.error.HTTPError) -> bool:
+    """A 503 from our own app means uploads are off; from a proxy it is transient."""
+    if err.code == 503:
+        try:
+            return bool(json.load(err).get("detail"))
+        except Exception:  # noqa: BLE001
+            return False
+    return err.code not in RETRY_CODES
 
 
 # --------------------------------------------------------------------------
@@ -192,6 +206,7 @@ class Stats:
     skipped: int = 0
     failed: int = 0
     faces: int = 0
+    pending: int = 0  # photos the server has accepted but not yet indexed
     bytes_sent: int = 0
     started: float = field(default_factory=time.monotonic)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -240,8 +255,9 @@ class PlainUI:
 
     def __exit__(self, *exc):
         s = self.stats
-        print(f"\n{s.uploaded} uploaded, {s.faces} faces, {s.duplicates} duplicates, "
-              f"{s.skipped} skipped, {s.failed} failed ({s.mb:.0f}MB)")
+        print(f"\n{s.uploaded} uploaded, {s.duplicates} duplicates, "
+              f"{s.skipped} skipped, {s.failed} failed ({s.mb:.0f}MB), "
+              f"{s.pending} still indexing on the server")
 
 
 class LiveUI:
@@ -313,7 +329,7 @@ class LiveUI:
                      f"{s.done}/{s.queued}   {s.rate:4.1f} ảnh/s   {s.mb:6.1f}MB")
         lines.append(
             f"  {c['green']}{s.uploaded:5d} uploaded{c['off']}   "
-            f"{s.faces:5d} faces   "
+            f"{c['cyan']}{s.pending:5d} indexing{c['off']}   "
             f"{c['yellow']}{s.duplicates:4d} dup{c['off']}   "
             f"{s.skipped:4d} skipped   "
             f"{c['red'] if s.failed else c['dim']}{s.failed:3d} failed{c['off']}"
@@ -401,8 +417,10 @@ class Uploader:
         if self.fatal:
             return
         items = self._hash_batch(batch_paths)
-        if not items:
-            return
+        if items:
+            self._send_items(items)
+
+    def _send_items(self, items, depth: int = 0):
         paths = [p for p, _ in items]
         size = sum(p.stat().st_size for p in paths)
         for attempt in range(self.args.retries + 1):
@@ -414,17 +432,56 @@ class Uploader:
                 self._record(items, result, size)
                 return
             except urllib.error.HTTPError as e:
-                self.fatal = explain(e)
-                self.ui.log(self.fatal, "error")
-                return
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-                if attempt == self.args.retries:
-                    self.stats.add(failed=len(paths))
-                    self.ui.log(f"giving up on {len(paths)} file(s): {e}", "error")
+                message = explain(e)
+                if is_fatal(e):
+                    self.fatal = message
+                    self.ui.log(message, "error")
                     return
-                wait = 2 ** attempt
-                self.ui.log(f"network error, retry in {wait}s ({e})", "error")
-                time.sleep(wait)
+                # A gateway timeout usually means the batch was too slow for
+                # the proxy: split it rather than hammering the same request.
+                if e.code in (502, 504, 408) and len(items) > 1 and depth < 3:
+                    self.ui.log(f"{message}, splitting {len(items)} into two", "error")
+                    self._shrink(len(items))
+                    half = len(items) // 2
+                    self._send_items(items[:half], depth + 1)
+                    self._send_items(items[half:], depth + 1)
+                    return
+                if attempt == self.args.retries:
+                    self._fail(items, message)
+                    return
+                self._backoff(attempt, message)
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                if len(items) > 1 and depth < 3 and isinstance(e, (TimeoutError, OSError)):
+                    self.ui.log(f"timeout, splitting {len(items)} into two", "error")
+                    self._shrink(len(items))
+                    half = len(items) // 2
+                    self._send_items(items[:half], depth + 1)
+                    self._send_items(items[half:], depth + 1)
+                    return
+                if attempt == self.args.retries:
+                    self._fail(items, str(e))
+                    return
+                self._backoff(attempt, str(e))
+
+    def _backoff(self, attempt: int, why: str):
+        wait = min(2 ** attempt, 30)
+        self.ui.log(f"retry in {wait}s ({why})", "error")
+        time.sleep(wait)
+
+    def _fail(self, items, why: str):
+        self.stats.add(failed=len(items))
+        self.ui.log(f"giving up on {len(items)} file(s): {why}", "error")
+        with self._seen_lock:  # let a later run try them again
+            for _, digest in items:
+                self._in_flight.discard(digest)
+
+    def _shrink(self, size: int):
+        """Remember that this server cannot take batches this large."""
+        with self._seen_lock:
+            new = max(1, size // 2)
+            if new < self.args.batch:
+                self.args.batch = new
+                self.ui.set_status(f"batch size reduced to {new}")
 
     def _record(self, items, result: dict, size: int):
         by_name = {p["filename"]: p for p in result.get("photos", [])}
@@ -434,14 +491,15 @@ class Uploader:
                 self.state.mark(p, digest)
                 if entry.get("duplicate"):
                     self.stats.add(duplicates=1)
-                    self.ui.log(f"already on server: {p.name}", "dim")
+                    self.ui.log(f"đã có trên máy chủ: {p.name}", "dim")
                 else:
+                    # the server indexes in the background; faces arrive later
                     self.stats.add(uploaded=1, faces=entry.get("faces", 0))
-                    self.ui.log(f"{p.name}  ({entry.get('faces', 0)} faces)")
+                    self.ui.log(f"{p.name}")
             else:
                 self.stats.add(failed=1)
                 self.ui.log(f"{p.name}: {entry.get('error', 'rejected')}", "error")
-        self.stats.add(bytes_sent=size)
+        self.stats.add(bytes_sent=size, pending=result.get("pending", 0) - self.stats.pending)
         self.state.save()
 
     def run(self, paths) -> bool:
