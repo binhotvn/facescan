@@ -5,6 +5,41 @@ from facescan import db
 from .conftest import unit
 
 
+def test_connect_upgrades_a_database_from_an_older_version(tmp_path):
+    """A pre-sha256 database must open, keep its rows, and gain the column.
+
+    Regression: the sha256 index lived in SCHEMA, and CREATE TABLE IF NOT
+    EXISTS leaves an old table alone, so startup died with
+    "no such column: sha256" on every existing deployment.
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
+                             mtime REAL NOT NULL, width INTEGER, height INTEGER,
+                             n_faces INTEGER DEFAULT 0);
+        CREATE TABLE faces (id INTEGER PRIMARY KEY,
+                            photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                            bbox_x1 REAL, bbox_y1 REAL, bbox_x2 REAL, bbox_y2 REAL,
+                            det_score REAL, embedding BLOB NOT NULL);
+        """
+    )
+    old.execute("INSERT INTO photos (path, mtime, width, height) VALUES ('a.jpg', 1.0, 10, 10)")
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+
+    assert "sha256" in {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+    assert db.stats(conn) == {"photos": 1, "faces": 0}  # existing data untouched
+    conn.close()
+
+    db.connect(path).close()  # and connecting again is a no-op, not an error
+
+
 def test_schema_and_stats_empty(conn):
     assert db.stats(conn) == {"photos": 0, "faces": 0}
     embs, meta = db.load_index(conn)

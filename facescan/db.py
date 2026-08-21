@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS faces (
     embedding BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
-CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256);
 """
 
 
@@ -40,12 +39,17 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection):
-    """Add columns that databases created by older versions are missing."""
+    """Bring a database created by an older version up to date.
+
+    The sha256 index lives here, not in SCHEMA: on an existing database
+    CREATE TABLE IF NOT EXISTS is a no-op, so indexing a column the old table
+    does not have would fail before the column could be added.
+    """
     have = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
     if "sha256" not in have:
         conn.execute("ALTER TABLE photos ADD COLUMN sha256 TEXT")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256)")
-        conn.commit()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256)")
+    conn.commit()
 
 
 def file_hash(path) -> str:
