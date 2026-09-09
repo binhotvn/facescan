@@ -74,7 +74,7 @@ export default function App() {
       <header className="fa-topbar">
         <a className="fa-brand" href="/">
           <img className="fa-logo" src="/ff-mark.png" alt="" aria-hidden="true" />
-          <span className="fa-wordmark">FF AGENCY</span>
+          <span className="fa-wordmark">NEXTWAVES</span>
         </a>
       </header>
 
