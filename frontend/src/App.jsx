@@ -73,8 +73,7 @@ export default function App() {
     <Theme theme="white">
       <header className="fa-topbar">
         <a className="fa-brand" href="/">
-          <img className="fa-logo" src="/ff-mark.png" alt="" aria-hidden="true" />
-          <span className="fa-wordmark">NEXTWAVES</span>
+          <img className="fa-logo" src="/nextwaves-logo.png" alt="Nextwaves" />
         </a>
       </header>
 

@@ -2,10 +2,11 @@
   $use-akamai-cdn: true
 );
 
-// FF Agency brand red, sampled from the master logo (LOGO FF-12.png)
-$ff-red: #a13122;
-$ff-red-dark: #7d2418;
-$ff-red-soft: #fdecea;
+// Nextwaves brand: monochrome. Near-black rather than pure #000 so large
+// filled areas (the hero) read as ink instead of a hole in the page.
+$brand: #161616;
+$brand-dark: #000000;
+$brand-soft: #f2f2f3;
 $page-bg: #f7f7f8;
 $radius: 8px;
 
@@ -24,22 +25,22 @@ body {
   color: #161616;
 }
 
-// Brand red replaces IBM blue on every interactive token, in whichever
+// Brand black replaces IBM blue on every interactive token, in whichever
 // theme wrapper Carbon happens to render.
 :root,
 .cds--white,
 .cds--g10 {
-  --cds-button-primary: #{$ff-red};
-  --cds-button-primary-hover: #b93b28;
-  --cds-button-primary-active: #{$ff-red-dark};
-  --cds-link-primary: #{$ff-red};
-  --cds-link-primary-hover: #{$ff-red-dark};
-  --cds-focus: #{$ff-red};
-  --cds-interactive: #{$ff-red};
-  --cds-border-interactive: #{$ff-red};
-  --cds-button-tertiary: #{$ff-red};
-  --cds-button-tertiary-hover: #{$ff-red-dark};
-  --cds-button-tertiary-active: #{$ff-red-dark};
+  --cds-button-primary: #{$brand};
+  --cds-button-primary-hover: #393939;
+  --cds-button-primary-active: #{$brand-dark};
+  --cds-link-primary: #{$brand};
+  --cds-link-primary-hover: #{$brand-dark};
+  --cds-focus: #{$brand};
+  --cds-interactive: #{$brand};
+  --cds-border-interactive: #{$brand};
+  --cds-button-tertiary: #{$brand};
+  --cds-button-tertiary-hover: #{$brand-dark};
+  --cds-button-tertiary-active: #{$brand-dark};
 }
 
 #root {
@@ -64,21 +65,14 @@ body {
 }
 
 .fa-logo {
-  block-size: 1.5rem;
+  // The logo art carries its own wordmark, so it stands alone in the bar.
+  block-size: 1.75rem;
   display: block;
-  margin-inline-end: 0.625rem;
-}
-
-.fa-wordmark {
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  font-size: 0.9375rem;
-  color: $ff-red;
 }
 
 // --- hero ------------------------------------------------------------------
 .fa-hero {
-  background: $ff-red;
+  background: $brand;
   color: #fff;
   text-align: center;
   padding: 3.5rem 1.5rem 5rem;
@@ -109,7 +103,7 @@ body {
   border: 0;
   border-radius: 999px;
   background: #fff;
-  color: $ff-red;
+  color: $brand;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -184,8 +178,8 @@ body {
     }
 
     &.is-photos {
-      background: $ff-red-soft;
-      color: $ff-red;
+      background: $brand-soft;
+      color: $brand;
     }
   }
 
@@ -231,13 +225,13 @@ body {
 
   @media (hover: hover) and (pointer: fine) {
     &:hover {
-      border-color: $ff-red;
+      border-color: $brand;
     }
   }
 
   &.is-active {
-    background: $ff-red;
-    border-color: $ff-red;
+    background: $brand;
+    border-color: $brand;
     color: #fff;
   }
 }
@@ -261,8 +255,8 @@ body {
   padding: 0.75rem 1rem;
   border: 0;
   border-radius: $radius;
-  background: $ff-red-soft;
-  color: $ff-red;
+  background: $brand-soft;
+  color: $brand;
   font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
@@ -317,8 +311,8 @@ body {
   inline-size: 2.5rem;
   block-size: 2.5rem;
   margin-block-end: 0.5rem;
-  border: 3px solid $ff-red-soft;
-  border-block-start-color: $ff-red;
+  border: 3px solid $brand-soft;
+  border-block-start-color: $brand;
   border-radius: 50%;
   animation: fa-spin 900ms linear infinite;
 }
@@ -375,7 +369,7 @@ body {
   }
 
   &:focus-visible {
-    outline: 2px solid $ff-red;
+    outline: 2px solid $brand;
     outline-offset: 2px;
   }
 
@@ -431,7 +425,7 @@ body {
     .fa-cta {
       inline-size: 100%;
       justify-content: center;
-      background: $ff-red;
+      background: $brand;
       color: #fff;
     }
   }
@@ -519,7 +513,7 @@ body {
   block-size: 4rem;
   border-radius: 50%;
   border: 4px solid #fff;
-  background: $ff-red;
+  background: $brand;
   box-shadow: 0 0 0 1px #d5d5d9;
   cursor: pointer;
   transition: transform 100ms ease-out;
