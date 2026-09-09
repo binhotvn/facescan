@@ -13,6 +13,7 @@ import usePhotos from './hooks/usePhotos';
 import JustifiedGrid from './components/JustifiedGrid';
 import CameraModal from './components/CameraModal';
 import Lightbox from './components/Lightbox';
+import logo from './assets/nextwaves-logo.png';
 
 export default function App() {
   const { photos, total, stats, loading, error, setError, pending, hasMore, loadMore, reload } =
@@ -73,7 +74,7 @@ export default function App() {
     <Theme theme="white">
       <header className="fa-topbar">
         <a className="fa-brand" href="/">
-          <img className="fa-logo" src="/nextwaves-logo.png" alt="Nextwaves" />
+          <img className="fa-logo" src={logo} alt="Nextwaves" />
         </a>
       </header>
 
