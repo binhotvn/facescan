@@ -13,7 +13,8 @@ import usePhotos from './hooks/usePhotos';
 import JustifiedGrid from './components/JustifiedGrid';
 import CameraModal from './components/CameraModal';
 import Lightbox from './components/Lightbox';
-import logo from './assets/nextwaves-logo.png';
+import logo from './assets/vinhhung-logo.png';
+import kv20 from './assets/vinhhung-20nam.webp';
 
 export default function App() {
   const { photos, total, stats, loading, error, setError, pending, hasMore, loadMore, reload } =
@@ -74,11 +75,19 @@ export default function App() {
     <Theme theme="white">
       <header className="fa-topbar">
         <a className="fa-brand" href="/">
-          <img className="fa-logo" src={logo} alt="Nextwaves" />
+          <img className="fa-logo" src={logo} alt="Vĩnh Hưng" />
         </a>
       </header>
 
       <section className="fa-hero">
+        <img
+          className="fa-hero__kv"
+          src={kv20}
+          width="960"
+          height="276"
+          fetchpriority="high"
+          alt="20 năm Vĩnh Hưng 2006 – 2026: Vững nội lực, vươn tầm vóc"
+        />
         <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
         <div className="fa-hero__actions">
           <button

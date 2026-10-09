@@ -2,11 +2,10 @@
   $use-akamai-cdn: true
 );
 
-// Nextwaves brand: monochrome. Near-black rather than pure #000 so large
-// filled areas (the hero) read as ink instead of a hole in the page.
-$brand: #161616;
-$brand-dark: #000000;
-$brand-soft: #f2f2f3;
+// Vĩnh Hưng brand blue, sampled from the logo art.
+$brand: #063ea0;
+$brand-dark: #042c73;
+$brand-soft: #eaf0fa;
 $page-bg: #f7f7f8;
 $radius: 8px;
 
@@ -31,7 +30,7 @@ body {
 .cds--white,
 .cds--g10 {
   --cds-button-primary: #{$brand};
-  --cds-button-primary-hover: #393939;
+  --cds-button-primary-hover: #0a4fc4;
   --cds-button-primary-active: #{$brand-dark};
   --cds-link-primary: #{$brand};
   --cds-link-primary-hover: #{$brand-dark};
@@ -66,7 +65,7 @@ body {
 
 .fa-logo {
   // The logo art carries its own wordmark, so it stands alone in the bar.
-  block-size: 1.75rem;
+  block-size: 2.25rem;
   display: block;
 }
 
@@ -76,6 +75,14 @@ body {
   color: #fff;
   text-align: center;
   padding: 3.5rem 1.5rem 5rem;
+
+  &__kv {
+    display: block;
+    inline-size: 100%;
+    max-inline-size: 30rem;
+    block-size: auto;
+    margin: 0 auto 1.5rem;
+  }
 
   h1 {
     font-size: clamp(1.5rem, 3.2vw, 2.25rem);
@@ -608,7 +615,7 @@ body {
     display: flex;
     gap: 0.5rem;
 
-    // outline button sits on the dark ground, so it goes white, not brand red
+    // outline button sits on the dark ground, so it goes white, not brand blue
     .cds--btn--tertiary {
       --cds-button-tertiary: #fff;
       --cds-button-tertiary-hover: #fff;

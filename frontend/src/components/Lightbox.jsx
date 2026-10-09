@@ -42,9 +42,9 @@ export default function Lightbox({ photos, index, onIndex, onClose }) {
       const blob = await fetch(photo.medium).then((r) => r.blob());
       const file = new File([blob], photo.path.split('/').pop(), { type: 'image/jpeg' });
       if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'Ảnh Nextwaves' });
+        await navigator.share({ files: [file], title: 'Ảnh Vĩnh Hưng' });
       } else {
-        await navigator.share({ title: 'Ảnh Nextwaves', url: window.location.href });
+        await navigator.share({ title: 'Ảnh Vĩnh Hưng', url: window.location.href });
       }
     } catch {
       /* user dismissed the share sheet */

@@ -47,11 +47,11 @@ MAX_UPLOAD_BATCH = int(os.environ.get("FACESCAN_MAX_UPLOAD_BATCH", "50"))
 # event site is a free file drop for anyone who finds it.
 UPLOAD_TOKEN = os.environ.get("FACESCAN_UPLOAD_TOKEN", "")
 UPLOAD_SUBDIR = os.environ.get("FACESCAN_UPLOAD_SUBDIR", "uploads")
-EVENT_NAME = os.environ.get("FACESCAN_EVENT_NAME", "Ảnh sự kiện Nextwaves")
+EVENT_NAME = os.environ.get("FACESCAN_EVENT_NAME", "Ảnh sự kiện Vĩnh Hưng")
 EVENT_DATE = os.environ.get("FACESCAN_EVENT_DATE", "")
 MAX_ZIP_PHOTOS = 200
 
-app = FastAPI(title="Nextwaves FaceScan")
+app = FastAPI(title="Vĩnh Hưng FaceScan")
 index = FaceIndex()
 # InsightFace sessions are not thread-safe; serialize inference across requests
 _infer_lock = threading.Lock()
