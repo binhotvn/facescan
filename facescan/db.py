@@ -138,6 +138,17 @@ def list_photos(conn, limit: int = 120, offset: int = 0):
     ]
 
 
+def delete_photos(conn, ids) -> list[str]:
+    """Drop photos (their faces cascade) and return the paths that were removed."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    paths = [r[0] for r in conn.execute(f"SELECT path FROM photos WHERE id IN ({marks})", ids)]
+    conn.execute(f"DELETE FROM photos WHERE id IN ({marks})", ids)
+    return paths
+
+
 def stats(conn):
     n_photos = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
     n_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]

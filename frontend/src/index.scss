@@ -69,6 +69,306 @@ body {
   display: block;
 }
 
+.fa-topbar__end {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.fa-topbar__link {
+  color: $brand;
+  font-size: 0.875rem;
+  text-decoration: none;
+  white-space: nowrap;
+
+  // the logo already links home; on phones the bar has room for one action
+  @media (max-width: 30rem) {
+    display: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+// --- admin upload ----------------------------------------------------------
+.fa-admin-page {
+  min-block-size: 100vh;
+}
+
+.fa-admin {
+  display: grid;
+  gap: 1.25rem;
+  max-inline-size: 56rem;
+  margin-inline: auto;
+  padding: 2rem 1rem 4rem;
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+
+  &__head p {
+    margin-block-start: 0.25rem;
+    color: #525252;
+    font-size: 0.9375rem;
+  }
+
+  &__card {
+    display: grid;
+    gap: 1rem;
+    padding: 1.5rem;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(22, 22, 22, 0.08);
+    animation: fa-rise var(--dur) var(--ease-out) both;
+  }
+
+  &__signin {
+    max-inline-size: 26rem;
+    inline-size: 100%;
+    margin-inline: auto;
+    margin-block-start: 2rem;
+
+    p {
+      color: #525252;
+      font-size: 0.9375rem;
+    }
+
+    .cds--btn {
+      max-inline-size: none;
+      inline-size: 100%;
+    }
+  }
+
+  &__panel {
+    display: grid;
+    gap: 1.25rem;
+
+    &[hidden] {
+      display: none;
+    }
+  }
+
+  &__tabs {
+    padding-block-end: 0;
+    border-block-end: 0;
+  }
+
+  &__more {
+    color: #6f6f6f;
+    font-size: 0.8125rem;
+  }
+
+  &__summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9375rem;
+  }
+
+  &__summary-end {
+    display: flex;
+    gap: 0.5rem;
+    margin-inline-start: auto;
+  }
+
+  &__list {
+    max-block-size: 28rem;
+    overflow-y: auto;
+    border-block-start: 1px solid #e8e8ea;
+
+    li {
+      // off-screen rows skip layout and paint entirely
+      content-visibility: auto;
+      contain-intrinsic-size: auto 2.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.25rem 0.75rem;
+      padding-block: 0.5rem;
+      border-block-end: 1px solid #f0f0f2;
+      font-size: 0.875rem;
+    }
+  }
+
+  &__name {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__size {
+    color: #6f6f6f;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__error {
+    flex-basis: 100%;
+    color: #da1e28;
+    font-size: 0.8125rem;
+  }
+}
+
+.fa-manage {
+  display: grid;
+  gap: 1rem;
+
+  &__bar {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(22, 22, 22, 0.08);
+    font-size: 0.9375rem;
+  }
+
+  &__bar-end {
+    display: flex;
+    gap: 0.5rem;
+    margin-inline-start: auto;
+  }
+
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+    gap: 0.5rem;
+
+    @media (max-width: 30rem) {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.25rem;
+    }
+  }
+
+  &__tile {
+    position: relative;
+    aspect-ratio: 1;
+    padding: 0;
+    border: 0;
+    border-radius: $radius;
+    overflow: hidden;
+    background: #e8e8ea;
+    cursor: pointer;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 8.5rem;
+
+    img {
+      display: block;
+      inline-size: 100%;
+      block-size: 100%;
+      object-fit: cover;
+      transition: transform var(--dur-fast) var(--ease-out);
+    }
+
+    &.is-selected {
+      outline: 3px solid $brand;
+      outline-offset: -3px;
+
+      img {
+        transform: scale(0.9);
+      }
+    }
+
+    &:focus-visible {
+      outline: 2px solid $brand;
+      outline-offset: 2px;
+    }
+  }
+
+  &__check {
+    position: absolute;
+    inset-block-start: 0.375rem;
+    inset-inline-start: 0.375rem;
+    color: $brand;
+    background: #fff;
+    border-radius: 50%;
+    opacity: 0;
+    transform: scale(0.6);
+    transition:
+      opacity var(--dur-fast) var(--ease-out),
+      transform var(--dur-fast) var(--ease-out);
+
+    .is-selected & {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  &__badge {
+    position: absolute;
+    inset-inline: 0.375rem;
+    inset-block-end: 0.375rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: 4px;
+    background: rgba(22, 22, 22, 0.7);
+    color: #fff;
+    font-size: 0.6875rem;
+    text-align: center;
+  }
+
+  &__empty {
+    padding-block: 3rem;
+    text-align: center;
+    color: #6f6f6f;
+  }
+
+  &__more {
+    justify-self: center;
+  }
+}
+
+.fa-drop {
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  color: #525252;
+  background: #fff;
+  border: 2px dashed #c6c6cc;
+  border-radius: 12px;
+  transition:
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
+
+  svg:first-child {
+    color: $brand;
+  }
+
+  strong {
+    color: #161616;
+    font-size: 1rem;
+  }
+
+  span {
+    font-size: 0.875rem;
+  }
+
+  &.is-over {
+    border-color: $brand;
+    background: $brand-soft;
+  }
+
+  &__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-block-start: 0.75rem;
+  }
+}
+
 // --- hero ------------------------------------------------------------------
 .fa-hero {
   background: $brand;

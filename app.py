@@ -90,6 +90,13 @@ def home():
     return _index_html()
 
 
+# The photographers' upload page. Same bundle as the gallery; the frontend
+# picks the view from the path. The page is public, the token guards the API.
+@app.get("/admin", response_class=HTMLResponse)
+def admin():
+    return _index_html()
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "faces_indexed": index.size, "faiss": HAVE_FAISS,
@@ -151,17 +158,17 @@ def api_search(
 ):
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Image too large.")
+        raise HTTPException(413, "Ảnh quá lớn.")
     arr = np.frombuffer(data, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
-        raise HTTPException(400, "Could not decode image.")
+        raise HTTPException(400, "Không đọc được ảnh.")
     # phone selfies arrive at 4000px; the detector gains nothing from that
     img, _ = downscale(img, QUERY_MAX_EDGE)
     with _infer_lock:
         face = detect_query_face(img)
     if face is None:
-        raise HTTPException(422, "No face detected — try a clearer, front-facing photo.")
+        raise HTTPException(422, "Không thấy khuôn mặt nào. Hãy thử ảnh rõ mặt, chụp chính diện.")
     results = index.search(face.normed_embedding, threshold)
     return {
         "matches": [
@@ -327,6 +334,9 @@ class Indexer:
                     self.q.task_done()
                     return
                 path, digest = item
+                if not path.is_file():  # deleted from the admin page while queued
+                    self.q.task_done()
+                    continue
                 try:
                     with _infer_lock:  # the model is not thread-safe
                         result = ingest._process_one(str(path))
@@ -347,6 +357,13 @@ class Indexer:
 
 
 indexer = Indexer()
+
+
+@app.get("/api/upload/check")
+def api_upload_check(x_upload_token: str | None = Header(default=None)):
+    """Lets the admin page sign in, and learn the limits it must batch by."""
+    _require_upload_token(x_upload_token)
+    return {"ok": True, "max_batch": MAX_UPLOAD_BATCH, "max_photo_bytes": MAX_PHOTO_BYTES}
 
 
 @app.post("/api/upload")
@@ -377,14 +394,9 @@ def api_upload(
             if len(data) > MAX_PHOTO_BYTES:
                 results.append({"filename": f.filename, "ok": False, "error": "Ảnh quá lớn."})
                 continue
-            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
-                continue
-            height, width = img.shape[:2]
-
             # Same bytes already indexed (re-sent, or the same shot filed under
-            # two names): keep the copy on disk, do not index it twice.
+            # two names): do not index it twice. Checked before decoding, so a
+            # re-sent 40MB photo costs a hash rather than a full decode.
             digest = hashlib.sha256(data).hexdigest()
             existing = db.photo_by_hash(conn, digest)
             if existing:
@@ -392,6 +404,13 @@ def api_upload(
                 results.append(dict(_photo_urls(existing), filename=f.filename,
                                     ok=True, duplicate=True, faces=0))
                 continue
+
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                results.append({"filename": f.filename, "ok": False, "error": "Không đọc được ảnh."})
+                continue
+            height, width = img.shape[:2]
+            del img  # a 24MP frame is ~70MB of pixels; do not hold it across the batch
 
             dest = dest_dir / _upload_name(f.filename)
             dest.write_bytes(data)
@@ -418,13 +437,42 @@ def api_upload(
     }
 
 
+@app.post("/api/photos/delete")
+def api_photos_delete(
+    ids: list[int] = Body(..., embed=True),
+    x_upload_token: str | None = Header(default=None),
+):
+    """Take photos down: the record, its faces, the file and its cached previews."""
+    _require_upload_token(x_upload_token)
+    if not ids:
+        raise HTTPException(400, "Chưa chọn ảnh nào.")
+    if len(ids) > 500:
+        raise HTTPException(413, "Tối đa 500 ảnh mỗi lần xoá.")
+    conn = db.connect()
+    try:
+        paths = db.delete_photos(conn, ids)
+        conn.commit()
+    finally:
+        conn.close()
+    for path in paths:
+        p = Path(path)
+        if not p.is_file() or not p.resolve().is_relative_to(PHOTOS_DIR):
+            continue
+        for size in PHOTO_SIZES:
+            for fmt in PHOTO_FORMATS:
+                _cache_path(p, size, fmt).unlink(missing_ok=True)
+        p.unlink(missing_ok=True)
+    index.refresh(force=True)
+    return {"deleted": len(paths)}
+
+
 @app.post("/api/download-zip")
 def api_download_zip(paths: list[str] = Body(..., embed=True)):
     """Bundle someone's matches into one .zip — the point of finding them."""
     if not paths:
-        raise HTTPException(400, "No photos selected.")
+        raise HTTPException(400, "Chưa chọn ảnh nào.")
     if len(paths) > MAX_ZIP_PHOTOS:
-        raise HTTPException(413, f"Too many photos (max {MAX_ZIP_PHOTOS}).")
+        raise HTTPException(413, f"Tối đa {MAX_ZIP_PHOTOS} ảnh mỗi lần tải.")
     files = [_safe_photo(p) for p in paths]  # validate all before streaming anything
 
     buf = io.BytesIO()

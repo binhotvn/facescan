@@ -107,6 +107,7 @@ Deployment shape for a real event:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/medium/w/h`) |
+| `GET /api/upload/check` | Validate an upload token (`X-Upload-Token`); returns batch and size limits |
 | `POST /api/upload` | Push event photos in (multipart `files`); each is indexed before the response. Requires `X-Upload-Token` |
 | `POST /api/download-zip` | Bundle a list of photo paths into one `.zip` |
 | `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid preview, 1600px viewer copy, or the original |
@@ -168,6 +169,15 @@ and would otherwise hit a reverse proxy's gateway timeout (504). `pending` in
 `/api/stats` and `/healthz` reports how many photos are still queued. Bad files
 are reported per-file without failing the batch, and content already indexed is
 refused as a duplicate.
+
+### `/admin`: upload from the browser
+
+Open `/admin`, enter the upload token, and drag in photos or whole folders (or
+use **Chọn ảnh** / **Chọn thư mục**). The page batches files to the server's
+`FACESCAN_MAX_UPLOAD_BATCH` and under 48MB per request, shows progress and a
+per-file result (received, already have it, or the error), and offers a retry
+for anything lost to a dropped connection. The token is checked against
+`GET /api/upload/check` and remembered in that browser until **Đăng xuất**.
 
 ### `upload.py`: push a whole folder
 

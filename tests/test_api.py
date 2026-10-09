@@ -400,6 +400,27 @@ def test_upload_is_disabled_without_a_configured_token(client, monkeypatch):
     assert r.status_code == 503
 
 
+def test_upload_check_signs_in_with_the_token(client, upload_ready):
+    r = client.get("/api/upload/check", headers={"X-Upload-Token": "s3cret"})
+    assert r.status_code == 200
+    assert r.json()["max_batch"] == app_module.MAX_UPLOAD_BATCH
+
+    assert client.get("/api/upload/check", headers={"X-Upload-Token": "nope"}).status_code == 401
+    assert client.get("/api/upload/check").status_code == 401
+
+
+def test_upload_check_reports_uploads_disabled(client, monkeypatch):
+    monkeypatch.setattr(app_module, "UPLOAD_TOKEN", "")
+    r = client.get("/api/upload/check", headers={"X-Upload-Token": "anything"})
+    assert r.status_code == 503
+
+
+def test_admin_page_is_served(client):
+    r = client.get("/admin")
+    assert r.status_code == 200
+    assert "<html" in r.text.lower()
+
+
 def test_upload_reports_unreadable_files_without_failing_the_batch(client, upload_ready):
     files = [
         ("files", ("good.jpg", _jpeg_bytes(), "image/jpeg")),
@@ -497,3 +518,48 @@ def test_photo_rejects_paths_outside_photos_dir(client, tmp_path):
     outside.write_bytes(_jpeg_bytes())
     assert client.get("/photo", params={"path": str(outside)}).status_code == 404
     assert client.get("/photo", params={"path": "/etc/passwd"}).status_code == 404
+
+
+# --- delete -----------------------------------------------------------------
+
+
+def _delete(client, ids, token="s3cret"):
+    headers = {"X-Upload-Token": token} if token else {}
+    return client.post("/api/photos/delete", json={"ids": ids}, headers=headers)
+
+
+def test_delete_removes_photo_faces_file_and_previews(client, upload_ready):
+    _upload(client, [("files", ("a.jpg", _jpeg_bytes(shade=40), "image/jpeg")),
+                     ("files", ("b.jpg", _jpeg_bytes(shade=90), "image/jpeg"))])
+    assert _indexed(client)["faces"] == 2
+    gone, kept = client.get("/api/photos").json()["photos"]
+    assert client.get(gone["thumb"]).status_code == 200  # render a cached preview
+
+    r = _delete(client, [gone["id"]])
+
+    assert r.status_code == 200 and r.json()["deleted"] == 1
+    body = client.get("/api/photos").json()
+    assert [p["id"] for p in body["photos"]] == [kept["id"]]
+    assert client.get("/api/stats").json()["faces"] == 1
+    assert not list(app_module.THUMBS_DIR.glob("*"))  # previews of the deleted photo
+    assert len(list(upload_ready.iterdir())) == 1
+    assert client.get(gone["thumb"]).status_code == 404
+
+
+def test_deleted_photo_can_be_uploaded_again(client, upload_ready):
+    data = _jpeg_bytes(shade=70)
+    _upload(client, [("files", ("a.jpg", data, "image/jpeg"))])
+    _indexed(client)
+    pid = client.get("/api/photos").json()["photos"][0]["id"]
+    _delete(client, [pid])
+
+    r = _upload(client, [("files", ("a.jpg", data, "image/jpeg"))])
+    assert r.json()["accepted"] == 1
+
+
+def test_delete_requires_the_token(client, upload_ready):
+    _upload(client, [("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))])
+    pid = client.get("/api/photos").json()["photos"][0]["id"]
+    assert _delete(client, [pid], token="nope").status_code == 401
+    assert _delete(client, [pid], token=None).status_code == 401
+    assert client.get("/api/photos").json()["total"] == 1
