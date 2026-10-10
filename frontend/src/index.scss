@@ -48,6 +48,15 @@ body,
   --cds-button-tertiary-active: #{$brand-dark};
 }
 
+.sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 #root {
   min-block-size: 100vh;
 }

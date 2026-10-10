@@ -92,7 +92,8 @@ export default function App() {
         <a href="/" aria-label="Vĩnh Hưng">
           <img className="fa-hero__logo" src={logoWhite} width="571" height="120" alt="" />
         </a>
-        <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
+        {/* the key visual below already names the event; the title stays for screen readers */}
+        <h1 className="sr-only">{event?.name ?? 'Ảnh sự kiện'}</h1>
         <img
           className="fa-hero__kv"
           src={heroKv}
@@ -128,7 +129,7 @@ export default function App() {
           <Stat icon={ImageIcon} label="Ảnh sự kiện" value={total.toLocaleString('vi-VN')} />
           <Stat
             icon={FaceActivated}
-            label="Khuôn mặt"
+            label="Người"
             value={(stats?.faces ?? 0).toLocaleString('vi-VN')}
           />
           {/* only when FACESCAN_EVENT_DATE is set */}
