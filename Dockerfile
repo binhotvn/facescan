@@ -8,7 +8,7 @@ COPY frontend/ .
 RUN mkdir -p /static && npm run build -- --outDir /static/dist
 
 # --- Stage 2: Python app ---
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # libgl/libglib needed by opencv; g++ for insightface's small Cython build
 RUN apt-get update && apt-get install -y --no-install-recommends \
