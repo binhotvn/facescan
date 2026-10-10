@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   Calendar,
   Download,
+  FaceActivated,
   Renew,
   Search,
 } from '@carbon/icons-react';
@@ -13,8 +14,22 @@ import usePhotos from './hooks/usePhotos';
 import JustifiedGrid from './components/JustifiedGrid';
 import CameraModal from './components/CameraModal';
 import Lightbox from './components/Lightbox';
-import logo from './assets/vinhhung-logo.png';
-import kv20 from './assets/vinhhung-20nam.webp';
+import logoWhite from './assets/vinhhung-logo-white.png';
+import heroKv from './assets/hero-kv.webp';
+
+function Stat({ icon: Icon, label, value }) {
+  return (
+    <div className="fa-stat">
+      <span className="fa-stat__icon">
+        <Icon size={24} />
+      </span>
+      <span className="fa-stat__text">
+        <span className="fa-stat__label">{label}</span>
+        <strong className="fa-stat__value">{value}</strong>
+      </span>
+    </div>
+  );
+}
 
 export default function App() {
   const { photos, total, stats, loading, error, setError, pending, hasMore, loadMore, reload } =
@@ -72,23 +87,20 @@ export default function App() {
   }
 
   return (
-    <Theme theme="white">
-      <header className="fa-topbar">
-        <a className="fa-brand" href="/">
-          <img className="fa-logo" src={logo} alt="Vĩnh Hưng" />
-        </a>
-      </header>
-
+    <Theme theme="white" className="fa-page">
       <section className="fa-hero">
+        <a href="/" aria-label="Vĩnh Hưng">
+          <img className="fa-hero__logo" src={logoWhite} width="571" height="120" alt="" />
+        </a>
+        <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
         <img
           className="fa-hero__kv"
-          src={kv20}
-          width="960"
-          height="276"
+          src={heroKv}
+          width="1108"
+          height="854"
           fetchpriority="high"
-          alt="20 năm Vĩnh Hưng 2006 – 2026: Vững nội lực, vươn tầm vóc"
+          alt="Sự kiện tri ân khách hàng & đối tác nhân dịp 20 năm thành lập Vĩnh Hưng. 20 năm, 2006 – 2026: Vững nội lực, vươn tầm vóc"
         />
-        <h1>{event?.name ?? 'Ảnh sự kiện'}</h1>
         <div className="fa-hero__actions">
           <button
             type="button"
@@ -113,28 +125,19 @@ export default function App() {
 
       <div className="fa-facts">
         <div className="fa-facts__card">
-          {/* the date half only appears when FACESCAN_EVENT_DATE is set */}
-          {event?.date && (
-            <>
-              <div className="fa-fact">
-                <span className="fa-fact__icon is-date">
-                  <Calendar size={20} />
-                </span>
-                <span>{event.date}</span>
-              </div>
-              <span className="fa-fact__divider" />
-            </>
-          )}
-          <div className="fa-fact">
-            <span className="fa-fact__icon is-photos">
-              <ImageIcon size={20} />
-            </span>
-            <span>{total.toLocaleString('vi-VN')} ảnh</span>
-          </div>
+          <Stat icon={ImageIcon} label="Ảnh sự kiện" value={total.toLocaleString('vi-VN')} />
+          <Stat
+            icon={FaceActivated}
+            label="Khuôn mặt"
+            value={(stats?.faces ?? 0).toLocaleString('vi-VN')}
+          />
+          {/* only when FACESCAN_EVENT_DATE is set */}
+          {event?.date && <Stat icon={Calendar} label="Thời gian" value={event.date} />}
         </div>
       </div>
 
       <main className="fa-main">
+        <h2 className="fa-title">{matches ? 'Ảnh của bạn' : 'Thư viện ảnh'}</h2>
         <div className="fa-chips">
           <button
             type="button"
@@ -199,8 +202,11 @@ export default function App() {
           </div>
         ) : shown.length === 0 && !matches ? (
           <div className="fa-empty">
-            <ImageIcon size={32} />
-            <p>Ảnh sự kiện sẽ xuất hiện ở đây ngay khi được tải lên.</p>
+            <span className="fa-empty__icon">
+              <ImageIcon size={28} />
+            </span>
+            <strong>Chưa có ảnh nào</strong>
+            <p>Ảnh sự kiện sẽ xuất hiện ở đây ngay khi được tải lên. Hãy quay lại sau nhé!</p>
           </div>
         ) : (
           <JustifiedGrid
@@ -211,6 +217,12 @@ export default function App() {
           />
         )}
       </main>
+
+      <footer className="fa-footer">
+        <img src={logoWhite} width="571" height="120" alt="Vĩnh Hưng" loading="lazy" />
+        <strong>Công ty Cổ phần Thương mại, Tư vấn và Xây dựng Vĩnh Hưng</strong>
+        <span>20 năm · 2006 – 2026 · Vững nội lực, vươn tầm vóc</span>
+      </footer>
 
       <input
         ref={fileRef}
