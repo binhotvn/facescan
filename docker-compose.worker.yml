@@ -1,0 +1,26 @@
+# A face-indexing node. Run on any machine that can reach the hub; it needs no
+# copy of the photos or the database, only the model baked into the image.
+#
+#   FACESCAN_HUB_URL=https://photos.example.com FACESCAN_WORKER_TOKEN=... \
+#     docker compose -f docker-compose.worker.yml up -d
+#
+# More throughput: more machines, or more model processes per machine
+# (FACESCAN_WORKER_PROCS, ~1GB RAM each; about one per 2 CPU cores).
+services:
+  worker:
+    image: ghcr.io/binhotvn/facescan:${FACESCAN_TAG:-latest}
+    pull_policy: always
+    command: ["python", "worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FACESCAN_HUB_URL: ${FACESCAN_HUB_URL:?set FACESCAN_HUB_URL to the hub's address}
+      FACESCAN_WORKER_TOKEN: ${FACESCAN_WORKER_TOKEN:?set FACESCAN_WORKER_TOKEN}
+      FACESCAN_WORKER_PROCS: ${FACESCAN_WORKER_PROCS:-1}
+    volumes:
+      - insightface-models:/root/.insightface
+    restart: unless-stopped
+
+volumes:
+  insightface-models:

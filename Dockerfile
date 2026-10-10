@@ -29,7 +29,7 @@ COPY scripts/ scripts/
 RUN PYTHONPATH=/app python scripts/prefetch_model.py
 
 COPY static/ static/
-COPY app.py .
+COPY app.py worker.py ./
 COPY --from=frontend /static/dist static/dist
 
 ENV FACESCAN_PHOTOS=/app/photos \
@@ -37,4 +37,6 @@ ENV FACESCAN_PHOTOS=/app/photos \
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
+# More web processes for more simultaneous searches: set WEB_CONCURRENCY
+# (uvicorn reads it). Each process loads its own model, ~1GB RAM.
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

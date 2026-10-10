@@ -97,10 +97,65 @@ Built in for scale:
 
 Deployment shape for a real event:
 
-- One box (8+ cores, 8GB RAM) comfortably handles a marathon-sized event: run ingest with `--workers N` as photographers upload, and the web app alongside it. CPU inference on the *query* selfie takes ~1s, so a single instance sustains roughly 1 search/sec; scale out by running more containers behind a load balancer sharing the same read-only `data/` + `photos/` volume.
+- One box (8+ cores, 8GB RAM) comfortably handles a marathon-sized event: run ingest with `--workers N` as photographers upload, and the web app alongside it.
+- **More indexing throughput: add worker nodes** on other machines (below). The backlog drains in parallel; the hub's CPU stays free for searches.
+- **More simultaneous searches: more web processes on the hub.** CPU inference on the *query* selfie takes ~1s, so one process sustains roughly 1 search/sec; `WEB_CONCURRENCY=4` runs four (each loads its own model, ~1GB RAM). They share the hub's disk, so every process sees every photo within `FACESCAN_INDEX_REFRESH_S` (default 5s). Do not run several hubs on a shared network volume: the app now writes (uploads, deletes) and SQLite is not safe over NFS/SMB.
 - Put a reverse proxy (Caddy/nginx/Traefik) in front for TLS; the app itself is plain HTTP on :8000. Note the camera capture feature requires HTTPS on non-localhost origins.
 - Ingest speed on CPU is roughly 1–3 photos/sec/worker at det_size 1024. The DB file is portable — you can ingest on a beefy machine and ship `data/facescan.db` to the web server.
 - Privacy: you're storing biometric embeddings of attendees — check consent/GDPR requirements for your event, and delete `data/` after the event if required.
+
+## Many machines: worker nodes
+
+Face detection is the expensive part (1–3 photos/sec per model process). The
+hub, the server running `app.py`, keeps the photos and the database; worker
+nodes on any number of other machines take photos off its backlog, run the
+model and send the faces back. Workers need no shared disk or database, only
+network access to the hub.
+
+```
+ photographers ──upload──▶  hub (app.py)  ◀──claim / photo / result──  worker × N
+ guests ───────search────▶  photos + SQLite                              (model only)
+```
+
+**On the hub** (`.env`):
+
+```bash
+FACESCAN_WORKER_TOKEN=$(openssl rand -hex 24)  # what workers authenticate with
+FACESCAN_LOCAL_INDEXING=0   # optional: leave all indexing to workers
+WEB_CONCURRENCY=2           # optional: more web processes for searches
+```
+
+**On each worker machine:**
+
+```bash
+FACESCAN_HUB_URL=https://photos.example.com \
+FACESCAN_WORKER_TOKEN=...   \
+FACESCAN_WORKER_PROCS=4     \
+  docker compose -f docker-compose.worker.yml up -d
+```
+
+or without Docker: `python worker.py --url https://photos.example.com --procs 4`.
+
+How it stays consistent:
+
+- **Claims are leases.** A worker claims a couple of photos at a time; each is
+  reserved for `FACESCAN_LEASE_SECONDS` (default 300). Two nodes never index the
+  same photo, and if a worker dies its photos go back to the pool when the lease
+  runs out. A result from a worker whose photo has since gone to someone else is
+  refused.
+- **The hub's own indexer joins in** unless `FACESCAN_LOCAL_INDEXING=0`; it
+  claims through the same queue, so it never duplicates a worker's work, and
+  when idle it adopts photos a dead worker left behind.
+- **Failures are bounded.** A photo that fails `FACESCAN_MAX_ATTEMPTS` (3) times
+  stays in the gallery with no faces instead of being retried forever.
+- **Progress** is in `pending` on `/healthz`, `/api/stats` and the admin page,
+  counted across every node.
+
+| Endpoint (header `X-Worker-Token`) | Purpose |
+|---|---|
+| `POST /api/worker/claim` | `{worker, limit}` → up to `limit` leased jobs |
+| `GET /api/worker/photo/{id}` | The original file of a claimed photo |
+| `POST /api/worker/result` | `{id, worker, width, height, faces}` or `{id, worker, error}` |
 
 ## API
 

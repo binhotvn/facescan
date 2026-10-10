@@ -1,6 +1,14 @@
-"""SQLite storage for photos and face embeddings."""
+"""SQLite storage for photos and face embeddings.
+
+It doubles as the indexing queue. A photo with n_faces NULL is waiting for
+face detection; whoever indexes it (the web app's own thread, or a worker
+node over HTTP) first claims it with a lease, so many indexers can share one
+backlog without two of them doing the same photo, and a node that dies
+mid-photo hands it back when the lease runs out.
+"""
 import hashlib
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
@@ -30,12 +38,26 @@ CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")  # readers (web app) don't block the ingest writer
-    conn.executescript(SCHEMA)
-    _migrate(conn)
-    return conn
+    # Several processes (web workers, ingest) can open a fresh database at the
+    # same moment. Switching to WAL and creating the schema need an exclusive
+    # lock that does not always wait on the busy timeout, so retry rather
+    # than fail a server's startup.
+    for attempt in range(100):
+        try:
+            if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                # readers (web app) don't block the ingest writer; persists in the file
+                conn.execute("PRAGMA journal_mode = WAL")
+            conn.executescript(SCHEMA)
+            _migrate(conn)
+            return conn
+        except sqlite3.OperationalError as e:
+            if attempt == 99 or not ("locked" in str(e) or "busy" in str(e)):
+                conn.close()
+                raise
+            time.sleep(0.05)
+    raise AssertionError("unreachable")
 
 
 def _migrate(conn: sqlite3.Connection):
@@ -46,8 +68,14 @@ def _migrate(conn: sqlite3.Connection):
     does not have would fail before the column could be added.
     """
     have = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
-    if "sha256" not in have:
-        conn.execute("ALTER TABLE photos ADD COLUMN sha256 TEXT")
+    for col, decl in (("sha256", "TEXT"), ("claimed_by", "TEXT"), ("claimed_until", "REAL"),
+                      ("attempts", "INTEGER NOT NULL DEFAULT 0")):
+        if col not in have:
+            try:
+                conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):  # another process got there first
+                    raise
     conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256)")
     conn.commit()
 
@@ -147,6 +175,101 @@ def delete_photos(conn, ids) -> list[str]:
     paths = [r[0] for r in conn.execute(f"SELECT path FROM photos WHERE id IN ({marks})", ids)]
     conn.execute(f"DELETE FROM photos WHERE id IN ({marks})", ids)
     return paths
+
+
+# --- the indexing queue -------------------------------------------------------
+
+# A claim is open while the photo is unindexed and its lease has not run out.
+_CLAIMABLE = "n_faces IS NULL AND (claimed_until IS NULL OR claimed_until < ?)"
+
+
+def pending_count(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM photos WHERE n_faces IS NULL").fetchone()[0]
+
+
+def claimable(conn, limit: int) -> list[dict]:
+    """Waiting photos nobody holds a live lease on (e.g. a worker node died)."""
+    rows = conn.execute(
+        f"SELECT path, sha256 FROM photos WHERE {_CLAIMABLE} ORDER BY id LIMIT ?",
+        (time.time(), limit),
+    ).fetchall()
+    return [{"path": r[0], "sha256": r[1]} for r in rows]
+
+
+def claim_path(conn, path: str, worker: str, lease: float) -> int | None:
+    """Claim one known photo; its id, or None if it is done or someone has it."""
+    now = time.time()
+    cur = conn.execute(
+        f"UPDATE photos SET claimed_by = ?, claimed_until = ?, attempts = attempts + 1"
+        f" WHERE path = ? AND {_CLAIMABLE}",
+        (worker, now + lease, path, now),
+    )
+    conn.commit()
+    if cur.rowcount != 1:
+        return None
+    return conn.execute("SELECT id FROM photos WHERE path = ?", (path,)).fetchone()[0]
+
+
+def claim_pending(conn, worker: str, limit: int, lease: float) -> list[dict]:
+    """Claim up to `limit` waiting photos, oldest first."""
+    conn.commit()
+    now = time.time()
+    conn.execute("BEGIN IMMEDIATE")  # pick and mark in one write lock: no double claims
+    try:
+        rows = conn.execute(
+            f"SELECT id, path, sha256 FROM photos WHERE {_CLAIMABLE} ORDER BY id LIMIT ?",
+            (now, limit),
+        ).fetchall()
+        conn.executemany(
+            "UPDATE photos SET claimed_by = ?, claimed_until = ?, attempts = attempts + 1"
+            " WHERE id = ?",
+            [(worker, now + lease, r[0]) for r in rows],
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return [{"id": r[0], "path": r[1], "sha256": r[2]} for r in rows]
+
+
+def finish_photo(conn, photo_id: int, worker: str, width: int, height: int, faces) -> bool:
+    """Store a claimed photo's faces. False if the claim was lost to another worker.
+
+    A worker whose lease ran out may still finish first; that is fine as long
+    as nobody else has claimed the photo since.
+    """
+    owner = conn.execute(
+        "SELECT claimed_by FROM photos WHERE id = ? AND n_faces IS NULL", (photo_id,)
+    ).fetchone()
+    if owner is None or owner[0] not in (worker, None):
+        return False
+    conn.execute("DELETE FROM faces WHERE photo_id = ?", (photo_id,))
+    for f in faces:
+        add_face(conn, photo_id, f["bbox"], f["det_score"], f["embedding"])
+    conn.execute(
+        "UPDATE photos SET width = ?, height = ?, n_faces = ?, claimed_by = NULL,"
+        " claimed_until = NULL WHERE id = ?",
+        (width, height, len(faces), photo_id),
+    )
+    conn.commit()
+    return True
+
+
+def fail_photo(conn, photo_id: int, worker: str, max_attempts: int) -> bool:
+    """Release a claim that failed. After max_attempts the photo is given up on:
+    it stays in the gallery, with no faces, rather than looping forever.
+    Returns True when it was given up."""
+    conn.execute(
+        "UPDATE photos SET claimed_by = NULL, claimed_until = NULL"
+        " WHERE id = ? AND claimed_by = ? AND n_faces IS NULL",
+        (photo_id, worker),
+    )
+    cur = conn.execute(
+        "UPDATE photos SET n_faces = 0 WHERE id = ? AND n_faces IS NULL AND attempts >= ?",
+        (photo_id, max_attempts),
+    )
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def stats(conn):

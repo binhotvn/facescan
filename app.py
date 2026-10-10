@@ -1,7 +1,12 @@
 """FaceScan web app: runners upload a selfie (or take one) and get their event photos.
 
 Run:  uvicorn app:app --host 0.0.0.0 --port 8000
+
+Face indexing can be spread over many machines: see worker.py. This process
+(the hub) keeps the database and the photos; worker nodes claim photos over
+HTTP, run the model, and send the faces back.
 """
+import base64
 import hashlib
 import io
 import logging
@@ -9,6 +14,7 @@ import os
 import queue
 import re
 import secrets
+import socket
 import threading
 import urllib.parse
 import zipfile
@@ -19,6 +25,7 @@ import cv2
 import numpy as np
 from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from facescan import db, ingest
 from facescan.engine import QUERY_MAX_EDGE, detect_query_face, downscale
@@ -47,6 +54,17 @@ MAX_UPLOAD_BATCH = int(os.environ.get("FACESCAN_MAX_UPLOAD_BATCH", "50"))
 # event site is a free file drop for anyone who finds it.
 UPLOAD_TOKEN = os.environ.get("FACESCAN_UPLOAD_TOKEN", "")
 UPLOAD_SUBDIR = os.environ.get("FACESCAN_UPLOAD_SUBDIR", "uploads")
+# Worker nodes authenticate with their own token, so a photographer's upload
+# token cannot write face data. Falls back to the upload token when unset.
+WORKER_TOKEN = os.environ.get("FACESCAN_WORKER_TOKEN", "")
+# 0 turns this process into a pure hub: uploads are queued for worker nodes and
+# the web process spends its CPU on searches only.
+LOCAL_INDEXING = os.environ.get("FACESCAN_LOCAL_INDEXING", "1") != "0"
+# How long a claimed photo stays reserved for its indexer. A node that dies
+# hands its photos back after this; set it above the slowest single photo.
+LEASE_SECONDS = float(os.environ.get("FACESCAN_LEASE_SECONDS", "300"))
+MAX_ATTEMPTS = int(os.environ.get("FACESCAN_MAX_ATTEMPTS", "3"))
+NODE_ID = f"local:{socket.gethostname()}:{os.getpid()}"
 EVENT_NAME = os.environ.get("FACESCAN_EVENT_NAME", "Ảnh sự kiện Vĩnh Hưng")
 EVENT_DATE = os.environ.get("FACESCAN_EVENT_DATE", "")
 MAX_ZIP_PHOTOS = 200
@@ -100,7 +118,7 @@ def admin():
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "faces_indexed": index.size, "faiss": HAVE_FAISS,
-            "pending": indexer.pending}
+            "pending": _pending()}
 
 
 @app.get("/api/stats")
@@ -108,7 +126,7 @@ def api_stats():
     conn = db.connect()
     s = db.stats(conn)
     conn.close()
-    return {**s, "pending": indexer.pending,
+    return {**s, "pending": _pending(),
             "event": {"name": EVENT_NAME, "date": EVENT_DATE}}
 
 
@@ -216,7 +234,11 @@ def _resized(p: Path, size: str, fmt: str) -> Path:
     if scale < 1:
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     THUMBS_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(cached), img, PHOTO_FORMATS[fmt][2])
+    # several web processes may render the same preview at once: write aside,
+    # then rename, so nobody serves a half-written file
+    tmp = cached.with_name(f"{cached.stem}.{os.getpid()}.{threading.get_ident()}{cached.suffix}")
+    cv2.imwrite(str(tmp), img, PHOTO_FORMATS[fmt][2])
+    os.replace(tmp, cached)
     return cached
 
 
@@ -288,6 +310,8 @@ class Indexer:
         return self.q.qsize()
 
     def submit(self, path: Path, digest: str):
+        if not LOCAL_INDEXING:
+            return  # left in the database for worker nodes to claim
         self.q.put((path, digest))
         self._ensure_running()
 
@@ -308,6 +332,8 @@ class Indexer:
 
     def resume(self):
         """Re-queue anything accepted but not indexed before the last restart."""
+        if not LOCAL_INDEXING:
+            return 0
         conn = db.connect()
         try:
             rows = db.pending_photos(conn)
@@ -329,12 +355,22 @@ class Indexer:
                 try:
                     item = self.q.get(timeout=30)
                 except queue.Empty:
-                    return  # idle: exit, a later upload starts a new thread
+                    # Before idling out, adopt photos a dead worker node let go of.
+                    orphans = db.claimable(conn, 50)
+                    if not orphans:
+                        return  # idle: exit, a later upload starts a new thread
+                    for o in orphans:
+                        self.q.put((Path(o["path"]), o["sha256"]))
+                    continue
                 if item is _STOP:
                     self.q.task_done()
                     return
-                path, digest = item
-                if not path.is_file():  # deleted from the admin page while queued
+                path, _digest = item
+                # Claim first: a worker node (or another web process) may have
+                # it, and a photo deleted while queued is simply gone.
+                photo_id = (db.claim_path(conn, str(path), NODE_ID, LEASE_SECONDS)
+                            if path.is_file() else None)
+                if photo_id is None:
                     self.q.task_done()
                     continue
                 try:
@@ -342,12 +378,15 @@ class Indexer:
                         result = ingest._process_one(str(path))
                     if result is None:
                         log.warning("indexer could not read %s", path)
+                        db.fail_photo(conn, photo_id, NODE_ID, MAX_ATTEMPTS)
                         continue
-                    result["sha256"] = digest
-                    faces = ingest._store(conn, result, path.stat().st_mtime)
-                    log.info("indexed %s (%d faces, %d queued)", path.name, faces, self.q.qsize())
+                    db.finish_photo(conn, photo_id, NODE_ID, result["width"], result["height"],
+                                    result["faces"])
+                    log.info("indexed %s (%d faces, %d queued)", path.name,
+                             len(result["faces"]), self.q.qsize())
                 except Exception:  # noqa: BLE001 - one bad photo must not kill the worker
                     log.exception("indexing failed for %s", path)
+                    db.fail_photo(conn, photo_id, NODE_ID, MAX_ATTEMPTS)
                 finally:
                     self.q.task_done()
                 if self.q.empty():
@@ -357,6 +396,103 @@ class Indexer:
 
 
 indexer = Indexer()
+
+
+def _pending() -> int:
+    """Photos still waiting for faces, across this process and every worker node."""
+    conn = db.connect()
+    try:
+        return db.pending_count(conn)
+    finally:
+        conn.close()
+
+
+# --- worker nodes -------------------------------------------------------------
+
+
+def _require_worker_token(token: str | None):
+    expected = WORKER_TOKEN or UPLOAD_TOKEN
+    if not expected:
+        raise HTTPException(503, "Worker nodes are disabled: set FACESCAN_WORKER_TOKEN.")
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(401, "Bad worker token.")
+
+
+class WorkerClaim(BaseModel):
+    worker: str = Field(min_length=1, max_length=100)
+    limit: int = Field(1, ge=1, le=32)
+
+
+class WorkerFace(BaseModel):
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    det_score: float
+    embedding: str  # base64 of 512 little-endian float32
+
+
+class WorkerResult(BaseModel):
+    id: int
+    worker: str = Field(min_length=1, max_length=100)
+    width: int | None = None
+    height: int | None = None
+    faces: list[WorkerFace] = []
+    error: str | None = Field(None, max_length=500)
+
+
+@app.post("/api/worker/claim")
+def api_worker_claim(body: WorkerClaim, x_worker_token: str | None = Header(default=None)):
+    """Hand a worker node up to `limit` photos to index, reserved for LEASE_SECONDS."""
+    _require_worker_token(x_worker_token)
+    conn = db.connect()
+    try:
+        jobs = db.claim_pending(conn, f"remote:{body.worker}", body.limit, LEASE_SECONDS)
+    finally:
+        conn.close()
+    return {
+        "lease_seconds": LEASE_SECONDS,
+        "jobs": [{"id": j["id"], "photo": f"/api/worker/photo/{j['id']}"} for j in jobs],
+    }
+
+
+@app.get("/api/worker/photo/{photo_id}")
+def api_worker_photo(photo_id: int, x_worker_token: str | None = Header(default=None)):
+    """The original file of a photo, for a worker node to index."""
+    _require_worker_token(x_worker_token)
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT path FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(404, "Not found")
+    return FileResponse(_safe_photo(row[0]))
+
+
+@app.post("/api/worker/result")
+def api_worker_result(body: WorkerResult, x_worker_token: str | None = Header(default=None)):
+    """Store what a worker node found, or release the photo if it failed."""
+    _require_worker_token(x_worker_token)
+    worker = f"remote:{body.worker}"
+    conn = db.connect()
+    try:
+        if body.error is not None or body.width is None or body.height is None:
+            gave_up = db.fail_photo(conn, body.id, worker, MAX_ATTEMPTS)
+            log.warning("worker %s failed photo %d: %s", body.worker, body.id, body.error)
+            return {"stored": False, "gave_up": gave_up}
+        faces = []
+        for f in body.faces:
+            try:
+                emb = np.frombuffer(base64.b64decode(f.embedding, validate=True), dtype="<f4")
+            except ValueError:
+                raise HTTPException(422, "Embedding is not valid base64.") from None
+            if emb.shape != (512,) or not np.isfinite(emb).all():
+                raise HTTPException(422, "Embedding must be 512 finite float32 values.")
+            faces.append({"bbox": f.bbox, "det_score": f.det_score, "embedding": emb})
+        stored = db.finish_photo(conn, body.id, worker, body.width, body.height, faces)
+    finally:
+        conn.close()
+    # no forced reload here: with many workers that would re-read every
+    # embedding per photo; searches pick new faces up within the refresh interval
+    return {"stored": stored}
 
 
 @app.get("/api/upload/check")
@@ -432,7 +568,7 @@ def api_upload(
     return {
         "accepted": accepted,
         "duplicates": duplicates,
-        "pending": indexer.pending,
+        "pending": _pending(),
         "photos": results,
     }
 

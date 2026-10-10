@@ -25,18 +25,17 @@ def iter_images(root: Path):
             yield p
 
 
-def _process_one(img_path_str: str):
-    """Worker: read + detect + embed one photo. Returns a picklable dict or None."""
+def process_image(img) -> dict:
+    """Detect + embed the faces in one decoded photo (BGR array).
+
+    Shared by the ingest CLI, the web app's indexer and worker nodes, so all
+    three store exactly the same thing.
+    """
     from .engine import downscale, extract_faces  # model loads lazily, once per process
-    img = cv2.imread(img_path_str)
-    if img is None:
-        return None
     h, w = img.shape[:2]
     small, scale = downscale(img)  # detection runs on a capped copy
     faces = extract_faces(small)
     return {
-        "path": img_path_str,
-        "sha256": db.file_hash(img_path_str),
         "width": w,       # original dimensions: the gallery lays out with these
         "height": h,
         "faces": [
@@ -49,6 +48,14 @@ def _process_one(img_path_str: str):
             for f in faces
         ],
     }
+
+
+def _process_one(img_path_str: str):
+    """Worker: read + detect + embed one photo. Returns a picklable dict or None."""
+    img = cv2.imread(img_path_str)
+    if img is None:
+        return None
+    return {"path": img_path_str, "sha256": db.file_hash(img_path_str), **process_image(img)}
 
 
 def _store(conn, result, mtime: float) -> int:
