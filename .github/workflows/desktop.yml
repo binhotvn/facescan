@@ -1,0 +1,114 @@
+name: Desktop app
+
+# Kapok Uploader: tests on every change under desktop/, installers for macOS
+# (.dmg/.zip, Apple Silicon + Intel) and Windows (one portable .exe).
+# Push a tag desktop-v1.2.3 to publish them as a GitHub release.
+#
+# Signing (optional; unsigned builds open after one "Open anyway"):
+#   macOS:   MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD, APPLE_ID,
+#            APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID (notarisation)
+#   Windows: WIN_CERT_P12_BASE64, WIN_CERT_PASSWORD
+
+on:
+  push:
+    branches: [main]
+    paths: ["desktop/**", ".github/workflows/desktop.yml"]
+    tags: ["desktop-v*"]
+  pull_request:
+    paths: ["desktop/**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: dist:mac
+          - os: windows-latest
+            script: dist:win
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+
+      - name: Image library for the Intel build too
+        if: runner.os == 'macOS'
+        run: |
+          v=$(node -p "require('./node_modules/sharp/package.json').optionalDependencies['@img/sharp-darwin-x64']")
+          l=$(node -p "require('./node_modules/sharp/package.json').optionalDependencies['@img/sharp-libvips-darwin-x64']")
+          npm install --no-save --force "@img/sharp-darwin-x64@$v" "@img/sharp-libvips-darwin-x64@$l"
+
+      - name: Face engine backends on this platform
+        run: node -e "console.log(require('onnxruntime-node').listSupportedBackends())"
+
+      - name: Signing, when certificates are configured
+        env:
+          MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          WIN_CERT: ${{ secrets.WIN_CERT_P12_BASE64 }}
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$MAC_CERT" ]; then
+            echo "CSC_LINK=$MAC_CERT" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = "Windows" ] && [ -n "$WIN_CERT" ]; then
+            echo "CSC_LINK=$WIN_CERT" >> "$GITHUB_ENV"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          fi
+
+      - run: npm run ${{ matrix.script }}
+        env:
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CERT_PASSWORD || secrets.WIN_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kapok-uploader-${{ runner.os }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" out/* --repo "${GITHUB_REPOSITORY}" --title "Kapok Uploader ${GITHUB_REF_NAME#desktop-v}" --generate-notes

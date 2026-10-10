@@ -163,6 +163,8 @@ How it stays consistent:
 | --- | --- |
 | `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/medium/w/h`) |
 | `GET /api/upload/check` | Validate an upload token (`X-Upload-Token`); returns batch and size limits |
+| `GET /api/models` | Model manifest + signature for on-device indexing (upload token) |
+| `GET /api/models/{role}` | The `detection` (fixed 1024x1024 copy) or `recognition` model file |
 | `POST /api/upload` | Push event photos in (multipart `files`); each is indexed before the response. Requires `X-Upload-Token` |
 | `POST /api/download-zip` | Bundle a list of photo paths into one `.zip` |
 | `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid preview, 1600px viewer copy, or the original |
@@ -233,6 +235,44 @@ use **Chọn ảnh** / **Chọn thư mục**). The page batches files to the ser
 per-file result (received, already have it, or the error), and offers a retry
 for anything lost to a dropped connection. The token is checked against
 `GET /api/upload/check` and remembered in that browser until **Đăng xuất**.
+
+### Kapok Uploader: the desktop app (macOS / Windows)
+
+`desktop/` is an Electron app for photographers: pick a folder (or drag it in),
+press start. Builds come from CI (`.github/workflows/desktop.yml`): a `.dmg` /
+`.zip` for Apple Silicon and Intel Macs, and one portable `.exe` for Windows.
+Nothing to install, no Python. Tag `desktop-v1.2.3` to publish a release.
+
+- **Zero typing:** the admin page's **Cấu hình app Kapok** button downloads
+  `kapok-uploader.json` (server address + upload token). Put it next to the app
+  or leave it in Downloads and the app connects itself on first launch; or drag
+  it onto the window.
+- **Compression:** Gốc (original) / Cao (long edge 4096px) / Nhanh (2560px),
+  EXIF orientation applied, mozjpeg via libvips. Compression of the next batch
+  overlaps the upload of the current one; progress counts bytes on the socket.
+- **Faces on the photographer's machine:** the app downloads the server's own
+  models (`GET /api/models`), runs detection + embedding on CoreML (Apple GPU /
+  Neural Engine) or DirectML (any DirectX 12 GPU: NVIDIA, AMD, Intel), CPU
+  otherwise, and sends the faces with each photo. The server stores them
+  directly when their `signature` (hash of both model files + det size, long
+  edge cap, threshold) matches its own; otherwise it indexes the photo itself.
+  Against the server on the same files: same faces, cosine ≥ 0.999; about 80ms
+  per group photo on an M-series Mac vs ~2.5s on the server's CPU.
+- **Node mode:** a switch turns the machine into a worker for the server's
+  backlog (the `/api/worker/*` API, same leases as `worker.py`), with the
+  upload token.
+- Shares `upload.py`'s state file, so a folder sent from either is not re-sent.
+
+Unsigned builds show one warning on first open (macOS: right-click → Open;
+Windows: More info → Run anyway). Add the signing secrets listed at the top of
+the workflow to remove it.
+
+```bash
+cd desktop && npm ci
+npm start          # run from source
+npm test           # engine tests (node --test)
+npm run dist:mac   # local macOS build into desktop/release/
+```
 
 ### `upload.py`: push a whole folder
 

@@ -1,0 +1,95 @@
+{
+  "name": "kapok-uploader",
+  "productName": "Kapok Uploader",
+  "version": "1.0.0",
+  "description": "Tải ảnh sự kiện lên máy chủ FaceScan",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "test": "node --test electron/*.test.cjs",
+    "e2e": "vite build && node scripts/e2e.mjs",
+    "dist:mac": "vite build && electron-builder --mac --publish never",
+    "dist:win": "vite build && electron-builder --win portable --publish never"
+  },
+  "build": {
+    "appId": "vn.kapok.uploader",
+    "productName": "Kapok Uploader",
+    "artifactName": "Kapok-Uploader-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "electron/**/*.cjs",
+      "!electron/**/*.test.cjs",
+      "dist/**"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.photography",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v*/win32/**",
+        "!node_modules/onnxruntime-node/bin/napi-v*/linux/**"
+      ],
+      "icon": "build/icon.png"
+    },
+    "dmg": {
+      "title": "Kapok Uploader"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**",
+        "!node_modules/onnxruntime-node/bin/napi-v*/linux/**",
+        "!node_modules/@img/*darwin*/**"
+      ],
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "Kapok-Uploader-${version}-win-portable.exe"
+    },
+    "asarUnpack": [
+      "electron/face-worker.cjs",
+      "electron/face.cjs",
+      "node_modules/**"
+    ]
+  },
+  "devDependencies": {
+    "@atlaskit/tokens": "^20.4.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
+    "playwright-core": "1.55",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.4.4"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.23",
+    "sharp": "^0.34.5"
+  }
+}
