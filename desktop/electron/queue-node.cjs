@@ -48,6 +48,16 @@ class QueueNode extends EventEmitter {
         this.emit('status', `Mất kết nối máy chủ, thử lại sau ${Math.round(idle / 1000)} giây`);
       }
       if (!jobs.length) {
+        // say why there is nothing to do, so an idle node does not look broken
+        try {
+          const st = await (await fetch(`${this.url}/api/stats`, { signal: AbortSignal.timeout(15000) })).json();
+          this.emit('queue', st.pending);
+          this.emit('status', st.pending
+            ? `Máy chủ còn ${st.pending} ảnh chờ, đang được máy khác xử lý. Sẵn sàng nhận việc.`
+            : 'Hàng chờ của máy chủ đang trống. Ảnh mới cần nhận diện sẽ được xử lý tại đây.');
+        } catch {
+          /* the next claim reports the connection problem */
+        }
         await sleep(idle);
         idle = Math.min(idle * 1.5, IDLE_MAX);
         continue;

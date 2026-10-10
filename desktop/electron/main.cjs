@@ -256,6 +256,7 @@ ipcMain.handle('node:start', (_e, { url, token }) => {
   });
   queueNode.on('status', (text) => send('node', { status: text }));
   queueNode.on('stats', (stats) => send('node', { stats }));
+  queueNode.on('queue', (pending) => send('node', { pending }));
   queueNode.on('done', () => {
     queueNode = null;
     awake(false);

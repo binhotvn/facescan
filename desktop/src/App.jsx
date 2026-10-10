@@ -555,6 +555,17 @@ export default function App() {
                 }}
                 label="Làm node xử lý hàng chờ của máy chủ"
               />
+              {faces.state !== 'ready' && (
+                <p className="hint">
+                  Cần model nhận diện chạy được trên máy này
+                  {faces.state === 'unsupported' ? ' (máy chủ chưa hỗ trợ).' : '.'}
+                </p>
+              )}
+              {faces.state === 'ready' && !nodeOn && (
+                <p className="hint">
+                  Máy này sẽ nhận diện giúp các ảnh đang chờ trên máy chủ, kể cả ảnh từ máy khác tải lên.
+                </p>
+              )}
             </div>
             {(s?.analyzed > 0 || node.running || node.stats) && (
               <div className="facestats">
@@ -566,8 +577,8 @@ export default function App() {
                 )}
                 {(node.running || node.stats) && (
                   <span>
-                    Node: <b>{num(node.stats?.processed)}</b> ảnh, {num(node.stats?.faces)} khuôn mặt
-                    {server?.stats?.pending ? ` · máy chủ còn ${num(server.stats.pending)} ảnh chờ` : ''}
+                    Node đã xử lý <b>{num(node.stats?.processed)}</b> ảnh, {num(node.stats?.faces)} khuôn mặt
+                    {node.pending != null ? ` · hàng chờ máy chủ: ${num(node.pending)} ảnh` : ''}
                     <em>{node.status}</em>
                   </span>
                 )}

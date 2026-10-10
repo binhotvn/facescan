@@ -46,7 +46,7 @@ console.log('upload:', (await win.locator('.facestats').innerText()).replace(/\n
 if (process.env.KAPOK_E2E_QUEUE_CMD) {
   execSync(process.env.KAPOK_E2E_QUEUE_CMD, { stdio: 'ignore' }); // photos the server must index
   await win.click('text=Làm node xử lý hàng chờ của máy chủ');
-  await win.waitForFunction(() => /Node: 12 ảnh/.test(document.querySelector('.facestats')?.innerText || ''), null, { timeout: 120000 });
+  await win.waitForFunction(() => /Node đã xử lý 12 ảnh/.test(document.querySelector('.facestats')?.innerText || ''), null, { timeout: 120000 });
   await win.waitForTimeout(500);
   await shot('3-node');
   console.log('node:', (await win.locator('.facestats').innerText()).replace(/\n/g, ' | '));
