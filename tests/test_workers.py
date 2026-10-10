@@ -151,12 +151,34 @@ def test_worker_round_trip(hub):
     assert stats["pending"] == 0 and stats["faces"] == 1
 
 
-def test_worker_endpoints_need_the_worker_token(hub):
+def test_worker_endpoints_need_a_token(hub):
     _upload(hub, 1)
-    bad = {"X-Worker-Token": "upl0ad"}  # the photographers' token is not enough
+    bad = {"X-Worker-Token": "nope"}
     assert hub.post("/api/worker/claim", json={"worker": "x"}, headers=bad).status_code == 401
     assert hub.post("/api/worker/claim", json={"worker": "x"}).status_code == 401
     assert hub.get("/api/worker/photo/1").status_code == 401
+
+
+def test_the_upload_token_also_runs_a_worker(hub):
+    """A photographer's laptop indexes the backlog with the one code it has."""
+    _upload(hub, 1)
+    r = hub.post("/api/worker/claim", json={"worker": "laptop"}, headers={"X-Worker-Token": "upl0ad"})
+    assert len(r.json()["jobs"]) == 1
+
+
+def test_worker_results_from_another_model_are_refused(hub, monkeypatch):
+    monkeypatch.setattr(app_module, "_client_signature", lambda: "sig")
+    _upload(hub, 1)
+    job = hub.post("/api/worker/claim", json={"worker": "n1"}, headers=TOKEN).json()["jobs"][0]
+    body = {"id": job["id"], "worker": "n1", "width": 60, "height": 40, "faces": [
+        {"bbox": [1, 2, 3, 4], "det_score": 0.9, "embedding": _b64(unit(7))}]}
+    r = hub.post("/api/worker/result", headers=TOKEN, json={**body, "signature": "old-model"})
+    assert r.json()["stored"] is False
+    assert hub.get("/api/stats").json()["pending"] == 1  # still waiting for a real index
+    # released: another claim gets it, and a matching signature is stored
+    job = hub.post("/api/worker/claim", json={"worker": "n1"}, headers=TOKEN).json()["jobs"][0]
+    r = hub.post("/api/worker/result", headers=TOKEN, json={**body, "id": job["id"], "signature": "sig"})
+    assert r.json() == {"stored": True}
 
 
 def test_worker_result_rejects_malformed_embeddings(hub):

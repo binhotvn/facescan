@@ -272,6 +272,18 @@ def fail_photo(conn, photo_id: int, worker: str, max_attempts: int) -> bool:
     return cur.rowcount == 1
 
 
+def release_photo(conn, photo_id: int, worker: str) -> bool:
+    """Hand a claim back without counting it as a failed attempt."""
+    cur = conn.execute(
+        "UPDATE photos SET claimed_by = NULL, claimed_until = NULL,"
+        " attempts = MAX(attempts - 1, 0)"
+        " WHERE id = ? AND claimed_by = ? AND n_faces IS NULL",
+        (photo_id, worker),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
 def stats(conn):
     n_photos = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
     n_faces = conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0]

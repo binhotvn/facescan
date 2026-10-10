@@ -1,8 +1,16 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Theme, Button, PasswordInput, InlineNotification, ProgressBar, Tag } from '@carbon/react';
-import { CloudUpload, Folder, Image as ImageIcon, Logout, Renew } from '@carbon/icons-react';
+import {
+  CloudUpload,
+  Download,
+  Folder,
+  Image as ImageIcon,
+  Logout,
+  Renew,
+} from '@carbon/icons-react';
 
 import AdminPhotos from './components/AdminPhotos';
+import StorageCard from './components/StorageCard';
 import logo from './assets/vinhhung-logo.png';
 
 const TOKEN_KEY = 'facescan.uploadToken';
@@ -132,6 +140,7 @@ export default function Admin() {
   const [dragging, setDragging] = useState(false);
   const [stats, setStats] = useState(null);
   const [tab, setTab] = useState('upload');
+  const [storage, setStorage] = useState(null);
   const progressFrame = useRef(0);
   const sentBytes = useRef(new Map()); // batch id -> bytes on the wire so far
   const [progressBytes, setProgressBytes] = useState(0);
@@ -171,14 +180,17 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const refreshStats = useCallback(
-    () =>
-      fetch('/api/stats')
-        .then((r) => r.json())
-        .then(setStats)
-        .catch(() => {}),
-    [],
-  );
+  const refreshStats = useCallback(() => {
+    fetch('/api/stats')
+      .then((r) => r.json())
+      .then(setStats)
+      .catch(() => {});
+    if (!token) return;
+    fetch('/api/admin/storage', { headers: { 'X-Upload-Token': token } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setStorage(d))
+      .catch(() => {});
+  }, [token]);
 
   useEffect(() => {
     if (!limits) return undefined;
@@ -333,6 +345,21 @@ export default function Admin() {
   }, [items]);
   const retryable = items.some((it) => it.status === 'error' && it.retry);
 
+  // The desktop uploader reads this file instead of having the token typed in.
+  function downloadAppConfig() {
+    const body = JSON.stringify(
+      { url: window.location.origin, token, event: stats?.event?.name ?? '' },
+      null,
+      2
+    );
+    const href = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = 'kapok-uploader.json';
+    a.click();
+    URL.revokeObjectURL(href);
+  }
+
   const header = (
     <header className="fa-topbar">
       <a className="fa-brand" href="/">
@@ -342,6 +369,17 @@ export default function Admin() {
         <a href="/" className="fa-topbar__link">
           Xem thư viện
         </a>
+        {limits && (
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={Download}
+            onClick={downloadAppConfig}
+            title="File cấu hình cho app Kapok Uploader (Mac/Windows): đặt cạnh app hoặc trong Downloads là app tự kết nối. Chỉ gửi cho người được phép tải ảnh lên."
+          >
+            Cấu hình app Kapok
+          </Button>
+        )}
         {limits && (
           <Button
             kind="ghost"
@@ -425,6 +463,8 @@ export default function Admin() {
             Quản lý ảnh
           </button>
         </div>
+
+        <StorageCard storage={storage} />
 
         {tab === 'photos' && (
           <AdminPhotos token={token} onUnauthorized={signOut} onChanged={refreshStats} />

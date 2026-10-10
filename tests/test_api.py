@@ -563,3 +563,102 @@ def test_delete_requires_the_token(client, upload_ready):
     assert _delete(client, [pid], token="nope").status_code == 401
     assert _delete(client, [pid], token=None).status_code == 401
     assert client.get("/api/photos").json()["total"] == 1
+
+
+# --- storage ----------------------------------------------------------------
+
+
+def test_storage_reports_what_the_event_takes(client, upload_ready, monkeypatch):
+    monkeypatch.setitem(app_module._storage_cache, "at", -1e9)
+    data = [_jpeg_bytes(shade=s) for s in (30, 60)]
+    _upload(client, [("files", (f"{i}.jpg", d, "image/jpeg")) for i, d in enumerate(data)])
+
+    r = client.get("/api/admin/storage", headers={"X-Upload-Token": "s3cret"})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["photos_bytes"] == sum(len(d) for d in data)
+    assert body["photo_files"] == 2
+    assert body["db_bytes"] > 0
+    assert 0 < body["disk_free"] <= body["disk_total"]
+
+
+def test_storage_is_admin_only(client, upload_ready):
+    assert client.get("/api/admin/storage").status_code == 401
+    assert client.get("/api/admin/storage", headers={"X-Upload-Token": "x"}).status_code == 401
+
+
+def test_storage_drops_its_cache_after_a_delete(client, upload_ready, monkeypatch):
+    monkeypatch.setitem(app_module._storage_cache, "at", -1e9)
+    _upload(client, [("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))])
+    h = {"X-Upload-Token": "s3cret"}
+    assert client.get("/api/admin/storage", headers=h).json()["photo_files"] == 1
+    pid = client.get("/api/photos").json()["photos"][0]["id"]
+    client.post("/api/photos/delete", json={"ids": [pid]}, headers=h)
+    assert client.get("/api/admin/storage", headers=h).json()["photo_files"] == 0
+
+
+# --- faces indexed on the uploader's machine --------------------------------
+
+
+def _face_json(signature, n=1, seed=40):
+    import base64 as b64
+    import json as _json
+
+    return _json.dumps([{
+        "signature": signature,
+        "faces": [{"bbox": [1, 2, 30, 40], "det_score": 0.9,
+                   "embedding": b64.b64encode(unit(seed + i).astype("<f4").tobytes()).decode()}
+                  for i in range(n)],
+    }])
+
+
+def _upload_with_faces(client, faces, data=None):
+    return client.post("/api/upload", headers={"X-Upload-Token": "s3cret"},
+                       files=[("files", ("a.jpg", data or _jpeg_bytes(), "image/jpeg"))],
+                       data={"faces": faces})
+
+
+def test_signed_client_faces_are_stored_without_queueing(client, upload_ready, monkeypatch):
+    monkeypatch.setattr(app_module, "_client_signature", lambda: "sig")
+    calls = []
+    monkeypatch.setattr(app_module.ingest, "_process_one", lambda p: calls.append(p))
+
+    r = _upload_with_faces(client, _face_json("sig", n=3))
+
+    photo = r.json()["photos"][0]
+    assert photo["indexed"] is True and photo["faces"] == 3
+    stats = client.get("/api/stats").json()
+    assert stats["faces"] == 3 and stats["pending"] == 0
+    assert calls == []  # the server's model never ran
+
+
+def test_client_faces_for_other_models_fall_back_to_the_server(client, upload_ready, monkeypatch):
+    monkeypatch.setattr(app_module, "_client_signature", lambda: "sig")
+    r = _upload_with_faces(client, _face_json("stale-model"))
+    assert r.json()["photos"][0]["queued"] is True
+    assert _indexed(client)["faces"] == 1  # indexed by the (stub) server model
+
+
+def test_client_faces_without_a_server_model_fall_back(client, upload_ready, monkeypatch):
+    monkeypatch.setattr(app_module, "_client_signature", lambda: None)
+    assert _upload_with_faces(client, _face_json("sig")).json()["photos"][0]["queued"] is True
+
+
+@pytest.mark.parametrize("faces", [
+    "not json",
+    "[]",  # one entry per file
+    '[{"signature": "sig"}]',
+    '[{"signature": "sig", "faces": [{"bbox": [1, 2, 3], "det_score": 1, "embedding": ""}]}]',
+    '[{"signature": "sig", "faces": [{"bbox": [1, 2, 3, 4], "det_score": 1, "embedding": "AAAA"}]}]',
+])
+def test_malformed_client_faces_are_refused(client, upload_ready, monkeypatch, faces):
+    monkeypatch.setattr(app_module, "_client_signature", lambda: "sig")
+    assert _upload_with_faces(client, faces).status_code == 422
+    assert client.get("/api/photos").json()["total"] == 0
+
+
+def test_models_endpoint_needs_the_token_and_a_model(client, upload_ready, monkeypatch):
+    assert client.get("/api/models").status_code == 401
+    monkeypatch.setattr(app_module, "_client_models", lambda: None)
+    assert client.get("/api/models", headers={"X-Upload-Token": "s3cret"}).status_code == 503

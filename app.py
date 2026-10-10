@@ -9,13 +9,16 @@ HTTP, run the model, and send the faces back.
 import base64
 import hashlib
 import io
+import json
 import logging
 import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import threading
+import time
 import urllib.parse
 import zipfile
 from datetime import UTC, datetime
@@ -23,7 +26,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -411,10 +414,13 @@ def _pending() -> int:
 
 
 def _require_worker_token(token: str | None):
-    expected = WORKER_TOKEN or UPLOAD_TOKEN
-    if not expected:
+    # The upload token works too: the desktop uploader already sends face data
+    # with its uploads, so a separate token would protect nothing, and one code
+    # is all a photographer's laptop needs to also index the backlog.
+    accepted = [t for t in (WORKER_TOKEN, UPLOAD_TOKEN) if t]
+    if not accepted:
         raise HTTPException(503, "Worker nodes are disabled: set FACESCAN_WORKER_TOKEN.")
-    if not token or not secrets.compare_digest(token, expected):
+    if not token or not any(secrets.compare_digest(token, t) for t in accepted):
         raise HTTPException(401, "Bad worker token.")
 
 
@@ -436,6 +442,9 @@ class WorkerResult(BaseModel):
     height: int | None = None
     faces: list[WorkerFace] = []
     error: str | None = Field(None, max_length=500)
+    # sent by nodes that run their own copy of the models (the desktop app):
+    # results from a different model or setting are refused, not stored
+    signature: str | None = Field(None, max_length=128)
 
 
 @app.post("/api/worker/claim")
@@ -478,6 +487,9 @@ def api_worker_result(body: WorkerResult, x_worker_token: str | None = Header(de
             gave_up = db.fail_photo(conn, body.id, worker, MAX_ATTEMPTS)
             log.warning("worker %s failed photo %d: %s", body.worker, body.id, body.error)
             return {"stored": False, "gave_up": gave_up}
+        if body.signature is not None and body.signature != _client_signature():
+            db.release_photo(conn, body.id, worker)
+            return {"stored": False, "reason": "model mismatch"}
         faces = []
         for f in body.faces:
             try:
@@ -502,22 +514,115 @@ def api_upload_check(x_upload_token: str | None = Header(default=None)):
     return {"ok": True, "max_batch": MAX_UPLOAD_BATCH, "max_photo_bytes": MAX_PHOTO_BYTES}
 
 
+# --- on-device indexing (the desktop uploader) ---------------------------------
+
+
+def _client_models() -> dict | None:
+    """The model manifest clients index with, or None when this server has no model."""
+    try:
+        from facescan import clientmodels
+        from facescan.engine import MAX_EDGE, get_engine
+
+        return clientmodels.manifest(get_engine(), Path(db.DB_PATH).parent, MAX_EDGE)
+    except Exception:  # noqa: BLE001 - no model here: clients just upload and we index
+        log.warning("client model manifest unavailable", exc_info=log.isEnabledFor(logging.DEBUG))
+        return None
+
+
+def _client_signature() -> str | None:
+    m = _client_models()
+    return m["signature"] if m else None
+
+
+@app.get("/api/models")
+def api_models(x_upload_token: str | None = Header(default=None)):
+    """What an uploader needs to index faces on its own machine."""
+    _require_upload_token(x_upload_token)
+    m = _client_models()
+    if m is None:
+        raise HTTPException(503, "Máy chủ chưa có model nhận diện khuôn mặt.")
+    from facescan import clientmodels
+
+    return clientmodels.public(m)
+
+
+@app.get("/api/models/{role}")
+def api_model_file(role: str, x_upload_token: str | None = Header(default=None)):
+    _require_upload_token(x_upload_token)
+    m = _client_models()
+    if m is None or role not in m["files"]:
+        raise HTTPException(404, "Not found")
+    f = m["files"][role]
+    return FileResponse(f["path"], media_type="application/octet-stream", filename=f["name"])
+
+
+MAX_CLIENT_FACES = 500  # per photo; a crowd shot has dozens, not thousands
+
+
+def _client_faces(raw: str | None, count: int) -> list:
+    """Faces the uploader found itself, one entry per file, None where it did not.
+
+    Entries signed for a different model or setting are dropped (None), so the
+    server indexes those photos as usual; malformed input is refused outright.
+    """
+    if raw is None:
+        return [None] * count
+    try:
+        items = json.loads(raw)
+    except ValueError:
+        raise HTTPException(422, "faces is not valid JSON.") from None
+    if not isinstance(items, list) or len(items) != count:
+        raise HTTPException(422, "faces must have one entry per file.")
+    signature = _client_signature()
+    out = []
+    for item in items:
+        if item is None:
+            out.append(None)
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get("faces"), list):
+            raise HTTPException(422, "Each faces entry must be null or {signature, faces}.")
+        if signature is None or item.get("signature") != signature:
+            out.append(None)  # different model or settings: index it here
+            continue
+        if len(item["faces"]) > MAX_CLIENT_FACES:
+            raise HTTPException(422, "Too many faces in one photo.")
+        faces = []
+        for f in item["faces"]:
+            try:
+                bbox = [float(v) for v in f["bbox"]]
+                score = float(f["det_score"])
+                emb = np.frombuffer(base64.b64decode(f["embedding"], validate=True), dtype="<f4")
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(422, "Malformed face.") from None
+            if (len(bbox) != 4 or emb.shape != (512,) or not np.isfinite(emb).all()
+                    or not np.isfinite(bbox).all()):
+                raise HTTPException(422, "Malformed face.")
+            faces.append({"bbox": bbox, "det_score": score, "embedding": emb})
+        out.append(faces)
+    return out
+
+
 @app.post("/api/upload")
 def api_upload(
     files: list[UploadFile] = File(...),
+    faces: str | None = Form(default=None),
     x_upload_token: str | None = Header(default=None),
 ):
     """Photographers push event photos in.
 
     Files are validated, de-duplicated and stored before the response; face
     indexing happens on a background worker, so a batch of crowd photos cannot
-    time out the request. Guarded by FACESCAN_UPLOAD_TOKEN.
+    time out the request. An uploader that indexed the photos itself sends the
+    faces along (`faces`, one JSON entry per file, signed for this server's
+    models); those photos are searchable at once and skip the queue. Guarded
+    by FACESCAN_UPLOAD_TOKEN.
     """
     _require_upload_token(x_upload_token)
     if not files:
         raise HTTPException(400, "Không có ảnh nào.")
     if len(files) > MAX_UPLOAD_BATCH:
         raise HTTPException(413, f"Tối đa {MAX_UPLOAD_BATCH} ảnh mỗi lần.")
+    precomputed = _client_faces(faces, len(files))
 
     dest_dir = PHOTOS_DIR / UPLOAD_SUBDIR
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -525,7 +630,7 @@ def api_upload(
     results, accepted, duplicates = [], 0, 0
 
     try:
-        for f in files:
+        for f, client in zip(files, precomputed):
             data = f.file.read(MAX_PHOTO_BYTES + 1)
             if len(data) > MAX_PHOTO_BYTES:
                 results.append({"filename": f.filename, "ok": False, "error": "Ảnh quá lớn."})
@@ -550,6 +655,17 @@ def api_upload(
 
             dest = dest_dir / _upload_name(f.filename)
             dest.write_bytes(data)
+            if client is not None:
+                # indexed on the uploader's machine with our own models: store as is
+                pid = db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
+                for face in client:
+                    db.add_face(conn, pid, face["bbox"], face["det_score"], face["embedding"])
+                db.set_face_count(conn, pid, len(client))
+                conn.commit()
+                accepted += 1
+                results.append(dict(_photo_urls(str(dest)), filename=f.filename, ok=True,
+                                    indexed=True, faces=len(client)))
+                continue
             # Recorded now, with its hash, so a re-run is recognised as a
             # duplicate even before the background worker reaches it.
             db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
@@ -564,6 +680,8 @@ def api_upload(
             )
     finally:
         conn.close()
+    if accepted:
+        _storage_cache["at"] = -1e9  # new files on disk: the next read re-measures
 
     return {
         "accepted": accepted,
@@ -571,6 +689,60 @@ def api_upload(
         "pending": _pending(),
         "photos": results,
     }
+
+
+_STORAGE_TTL = 15.0  # seconds; walking 100k photos is not free
+_storage_cache: dict = {"at": -1e9, "data": None}
+_storage_lock = threading.Lock()
+
+
+def _dir_size(root: Path) -> tuple[int, int]:
+    """Bytes and file count under root, without following symlinks."""
+    total = files = 0
+    stack = [root]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for e in entries:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        total += e.stat(follow_symlinks=False).st_size
+                        files += 1
+                except OSError:
+                    continue
+    return total, files
+
+
+@app.get("/api/admin/storage")
+def api_storage(x_upload_token: str | None = Header(default=None)):
+    """How much disk the event takes, and how much the server has left."""
+    _require_upload_token(x_upload_token)
+    with _storage_lock:
+        if time.monotonic() - _storage_cache["at"] < _STORAGE_TTL:
+            return _storage_cache["data"]
+        photos_bytes, photo_files = _dir_size(PHOTOS_DIR)
+        thumbs_bytes, _ = _dir_size(THUMBS_DIR)
+        db_file = Path(db.DB_PATH)
+        db_bytes = sum(p.stat().st_size for p in
+                       (db_file, db_file.with_name(db_file.name + "-wal"))
+                       if p.is_file())
+        disk = shutil.disk_usage(PHOTOS_DIR if PHOTOS_DIR.exists() else Path.cwd())
+        data = {
+            "photos_bytes": photos_bytes,
+            "photo_files": photo_files,
+            "thumbs_bytes": thumbs_bytes,
+            "db_bytes": db_bytes,
+            "disk_total": disk.total,
+            "disk_used": disk.used,
+            "disk_free": disk.free,
+        }
+        _storage_cache.update(at=time.monotonic(), data=data)
+        return data
 
 
 @app.post("/api/photos/delete")
@@ -598,6 +770,7 @@ def api_photos_delete(
             for fmt in PHOTO_FORMATS:
                 _cache_path(p, size, fmt).unlink(missing_ok=True)
         p.unlink(missing_ok=True)
+    _storage_cache["at"] = -1e9
     index.refresh(force=True)
     return {"deleted": len(paths)}
 
