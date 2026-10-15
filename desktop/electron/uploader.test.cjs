@@ -36,14 +36,20 @@ function fakeServer({ fail = [] } = {}) {
       }
       const boundary = req.headers['content-type'].split('boundary=')[1];
       const parts = body.toString('latin1').split(`--${boundary}`).slice(1, -1);
-      const photos = parts.map((p) => {
-        const name = /filename="([^"]+)"/.exec(p)[1];
+      let album = null;
+      const photos = [];
+      for (const p of parts) {
+        const name = /filename="([^"]+)"/.exec(p)?.[1];
         const content = p.split('\r\n\r\n').slice(1).join('\r\n\r\n').slice(0, -2);
+        if (!name) {
+          if (/name="album"/.test(p)) album = Number(content);
+          continue;
+        }
         const dup = seen.has(content);
         seen.add(content);
-        return { filename: name, ok: true, duplicate: dup, queued: !dup };
-      });
-      calls.push({ names: photos.map((p) => p.filename), length: Number(req.headers['content-length']), bytes: body.length });
+        photos.push({ filename: name, ok: true, duplicate: dup, queued: !dup });
+      }
+      calls.push({ names: photos.map((p) => p.filename), album, length: Number(req.headers['content-length']), bytes: body.length });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ accepted: photos.filter((p) => !p.duplicate).length, pending: 0, photos }));
     });
@@ -115,6 +121,32 @@ test('compression applies EXIF orientation', async () => {
     .toFile(f);
   const meta = await sharp((await U.prepare(f, 'fast')).data).metadata();
   assert.deepEqual([meta.width, meta.height], [1280, 2560]);
+
+  // the viewer's copy too: upright, so the face boxes land where the faces are
+  const view = await U.preview(f);
+  assert.deepEqual([view.width, view.height], [1024, 2048]);
+  assert.ok(view.src.startsWith('data:image/jpeg;base64,'));
+});
+
+test('face crops come from the original, at boxes given in the sent copy', async () => {
+  const dir = tmpdir();
+  const f = path.join(dir, 'big.jpg');
+  // a red "face" at 3000..3400 x 2000..2400 of a 6000x4000 original
+  const red = await sharp({ create: { width: 400, height: 400, channels: 3, background: 'red' } }).png().toBuffer();
+  await sharp({ create: { width: 6000, height: 4000, channels: 3, background: 'gray' } })
+    .composite([{ input: red, left: 3000, top: 2000 }])
+    .jpeg()
+    .toFile(f);
+  const k = 2560 / 6000; // sent at 'fast': 2560 x 1707
+  const face = [3000 * k, 2000 * k, 3400 * k, 2400 * k];
+  const edge = [2540, 1690, 2560, 1707]; // in the corner: the crop is clamped, not an error
+  const crops = await U.faceCrops(f, [face, edge], 2560, 1707);
+  assert.equal(crops.length, 2);
+  const img = Buffer.from(crops[0].split(',')[1], 'base64');
+  const { data, info } = await sharp(img).raw().toBuffer({ resolveWithObject: true });
+  assert.deepEqual([info.width, info.height], [144, 144]);
+  const mid = (72 * 144 + 72) * 3;
+  assert.ok(data[mid] > 200 && data[mid + 1] < 60, `centre is red: ${[...data.subarray(mid, mid + 3)]}`);
 });
 
 test('uploads a folder in batches, then a second run sends nothing', async () => {
@@ -144,6 +176,79 @@ test('uploads a folder in batches, then a second run sends nothing', async () =>
   }
 });
 
+test('the first photo goes up alone, and the status counts photos being prepared', async () => {
+  const dir = tmpdir();
+  for (let i = 0; i < 5; i++) await photo(path.join(dir, `p${i}.jpg`), { shade: 15 + i * 45 });
+  const { server, calls, url } = await fakeServer();
+  try {
+    const analyze = async () => null; // on, but finds nothing
+    const up = new U.Uploader({ url, token: 't', folder: dir, batch: 4, workers: 1, analyze });
+    const statuses = [];
+    up.on('status', (s) => statuses.push(s));
+    const done = run(up);
+    up.run();
+    await done;
+    assert.deepEqual(calls.map((c) => c.names.length), [1, 4]);
+    for (let n = 0; n < 5; n++) assert.ok(statuses.includes(`Đang nén và nhận diện khuôn mặt ${n}/5 ảnh…`), `${n}/5`);
+    assert.equal(statuses.at(-1), 'Đang gửi lên máy chủ…');
+  } finally {
+    server.close();
+  }
+});
+
+test('each folder goes up into its own album, a folder inside another left to its own', async () => {
+  const root = tmpdir();
+  await photo(path.join(root, 'arrival.jpg'), { shade: 20 });
+  await photo(path.join(root, 'gala', 'toast.jpg'), { shade: 80 });
+  await photo(path.join(root, 'gala', 'dance.jpg'), { shade: 140 });
+  const awards = tmpdir();
+  await photo(path.join(awards, 'cup.jpg'), { shade: 200 });
+  const { server, calls, url } = await fakeServer();
+  try {
+    const sources = [
+      { folder: root, album: null },
+      { folder: path.join(root, 'gala'), album: 7, name: 'Gala Dinner' },
+      { folder: awards, album: 9, name: 'Lễ Trao Giải' },
+      { folder: awards, album: 3 }, // the same folder twice: its first album wins
+    ];
+    const up = new U.Uploader({ url, token: 't', sources, batch: 4, workers: 1 });
+    const done = run(up);
+    up.run();
+    const r = await done;
+    assert.equal(r.fatal, null);
+
+    const into = {};
+    for (const c of calls) for (const n of c.names) into[n] = c.album;
+    assert.deepEqual(into, { 'arrival.jpg': null, 'dance.jpg': 7, 'toast.jpg': 7, 'cup.jpg': 9 });
+    assert.equal(up.stats.uploaded, 4); // the gala photos went once, not also with the root
+    assert.deepEqual(r.sent.map((e) => e.album).sort(), ['Gala Dinner', 'Gala Dinner', 'Lễ Trao Giải', null].sort());
+
+    // and each folder remembers its own: a second run sends nothing
+    const again = new U.Uploader({ url, token: 't', sources, batch: 4, workers: 1 });
+    const done2 = run(again);
+    again.run();
+    await done2;
+    assert.equal(again.stats.skipped, 4);
+    assert.equal(calls.length, 3 + 0); // root alone, gala, awards
+    assert.deepEqual(await U.scanFolder(root, [path.join(root, 'gala')]), { total: 1, todo: 0, bytes: fs.statSync(path.join(root, 'arrival.jpg')).size });
+  } finally {
+    server.close();
+  }
+});
+
+test('an album deleted on the server stops the run with the server\'s reason', async () => {
+  const dir = tmpdir();
+  await photo(path.join(dir, 'a.jpg'));
+  const post = async () => {
+    throw new U.HttpError(404, 'Thư mục này không còn trên máy chủ (có thể đã bị xoá).');
+  };
+  const up = new U.Uploader({ url: 'http://x', token: 't', sources: [{ folder: dir, album: 5 }], post });
+  const done = run(up);
+  up.run();
+  const r = await done;
+  assert.equal(r.fatal, 'Thư mục này không còn trên máy chủ (có thể đã bị xoá).');
+});
+
 test('the same photo twice in one folder goes up once', async () => {
   const dir = tmpdir();
   const a = await photo(path.join(dir, 'a.jpg'));
@@ -164,16 +269,17 @@ test('the same photo twice in one folder goes up once', async () => {
 
 test('a gateway timeout splits the batch instead of failing it', async () => {
   const dir = tmpdir();
-  for (let i = 0; i < 4; i++) await photo(path.join(dir, `p${i}.jpg`), { shade: 10 + i * 40 });
-  const { server, calls, url } = await fakeServer({ fail: [504] });
+  for (let i = 0; i < 5; i++) await photo(path.join(dir, `p${i}.jpg`), { shade: 10 + i * 40 });
+  // the lone first photo goes through; the batch of four after it times out
+  const { server, calls, url } = await fakeServer({ fail: [null, 504] });
   try {
     const up = new U.Uploader({ url, token: 't', folder: dir, batch: 4, workers: 1 });
     const done = run(up);
     up.run();
     const r = await done;
     assert.equal(r.fatal, null);
-    assert.equal(up.stats.uploaded, 4);
-    assert.deepEqual(calls.map((c) => c.names.length), [2, 2]);
+    assert.equal(up.stats.uploaded, 5);
+    assert.deepEqual(calls.map((c) => c.names.length), [1, 2, 2]);
     assert.ok(r.logs.some((l) => l.msg.includes('chia lô')));
   } finally {
     server.close();
@@ -250,17 +356,18 @@ test('server errors read in Vietnamese', () => {
 test('faces found on this machine travel with the batch, one entry per file', async () => {
   const dir = tmpdir();
   for (let i = 0; i < 3; i++) await photo(path.join(dir, `p${i}.jpg`), { shade: 40 + i * 50 });
-  let seen = null;
+  const seen = [];
   const fakePost = async (url, token, files) => {
     // what postBatch would put in the "faces" field
-    seen = files.map((f) => (f.faces ? { signature: f.faces.signature, n: f.faces.faces.length } : null));
+    seen.push(...files.map((f) => (f.faces ? { signature: f.faces.signature, n: f.faces.faces.length } : null)));
     return { pending: 0, photos: files.map((f) => ({ ok: true, indexed: Boolean(f.faces) })) };
   };
   let calls = 0;
   const analyze = async (data) => {
     calls += 1;
     if (calls === 2) throw new Error('GPU hiccup'); // must not lose the photo
-    return { signature: 'sig', faces: [{ bbox: [1, 2, 3, 4], det_score: 0.9, embedding: 'AA==' }], ms: 5 };
+    const faces = [{ bbox: [1, 2, 3, 4], det_score: 0.9, embedding: 'AA==' }];
+    return { signature: 'sig', faces, ms: 5, width: 1200, height: 800 };
   };
   const up = new U.Uploader({ url: 'http://x', token: 't', folder: dir, batch: 3, workers: 1, post: fakePost, analyze });
   const done = run(up);
@@ -271,6 +378,14 @@ test('faces found on this machine travel with the batch, one entry per file', as
   assert.equal(seen.filter((x) => x === null).length, 1);
   assert.equal(up.stats.indexedHere, 2);
   assert.equal(up.stats.uploaded, 3);
+  // the window gets the boxes (not the embeddings) to draw on the photo
+  const drawn = r.sent.filter((e) => e.boxes);
+  assert.equal(drawn.length, 2);
+  assert.deepEqual(drawn.map((e) => [e.boxes, e.width, e.height]), [
+    [[[1, 2, 3, 4]], 1200, 800],
+    [[[1, 2, 3, 4]], 1200, 800],
+  ]);
+  assert.equal(r.sent.find((e) => !e.boxes).faces, null);
 });
 
 test('the faces field reaches the server as multipart form data', async () => {

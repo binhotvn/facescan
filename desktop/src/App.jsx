@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Logo from './Logo.jsx';
+import Viewer from './Viewer.jsx';
 
 const api = window.kapok;
 const MAX_TILES = 300;
@@ -41,6 +42,13 @@ function tail(p) {
   return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : p;
 }
 
+// album folders are remembered per server: album ids mean nothing elsewhere
+const serverKey = (u) => (u || '').trim().replace(/\/+$/, '');
+
+function scanText(scan) {
+  return scan ? `${num(scan.total)} ảnh · ${size(scan.bytes)} · ${num(scan.todo)} chưa gửi` : 'Đang đếm ảnh…';
+}
+
 // --- small pieces -------------------------------------------------------------
 function Card({ title, action, children, className = '' }) {
   return (
@@ -65,6 +73,58 @@ function Stat({ label, value, tone }) {
   );
 }
 
+/** One album (or "no album") and the folder on this machine that feeds it. */
+function SourceRow({ label, hint, folder, scan, disabled, onPick, onClear, onDropFile, onOver }) {
+  const [over, setOver] = useState(false);
+  const hover = (on) => {
+    setOver(on);
+    onOver(on);
+  };
+  return (
+    <li
+      className={`source${folder ? ' is-set' : ''}${over ? ' is-over' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!over) hover(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) hover(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        hover(false);
+        onDropFile(e.dataTransfer.files?.[0]);
+      }}
+    >
+      <div className="source__main">
+        <strong title={label}>{label}</strong>
+        {folder ? (
+          <>
+            <span className="source__path" title={folder}>
+              {tail(folder)}
+            </span>
+            <span className="source__sum">{scanText(scan)}</span>
+          </>
+        ) : (
+          <span className="source__hint">{hint}</span>
+        )}
+      </div>
+      <div className="source__actions">
+        <button type="button" className="btn btn--sm" disabled={disabled} onClick={onPick}>
+          {folder ? 'Đổi…' : 'Chọn thư mục…'}
+        </button>
+        {folder && (
+          <button type="button" className="btn btn--link source__clear" disabled={disabled} onClick={onClear}>
+            Bỏ
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
 function Switch({ checked, onChange, label, disabled }) {
   return (
     <label className={`switch${disabled ? ' is-disabled' : ''}`}>
@@ -86,8 +146,13 @@ export default function App() {
   const [editing, setEditing] = useState(true);
   const [connecting, setConnecting] = useState(false);
 
-  const [folder, setFolder] = useState(null);
-  const [scan, setScan] = useState(null);
+  const [folder, setFolder] = useState(null); // photos that go into no album
+  const [folders, setFolders] = useState({}); // album id -> folder on this machine
+  const [scans, setScans] = useState({}); // folder -> {total, todo, bytes}
+  const [newAlbum, setNewAlbum] = useState(null); // the name being typed, null when closed
+  const [creating, setCreating] = useState(false);
+  const [rowDrag, setRowDrag] = useState(false);
+  const savedFolders = useRef({}); // every server's album folders, as saved
   const [watch, setWatch] = useState(true);
   const [quality, setQuality] = useState('high');
 
@@ -97,6 +162,7 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [tiles, setTiles] = useState([]);
   const [filter, setFilter] = useState('all');
+  const [viewing, setViewing] = useState(null); // id of the tile open in the viewer
   const [logs, setLogs] = useState([]);
   const [logOpen, setLogOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -135,6 +201,7 @@ export default function App() {
       setServer(r.info);
       setServerMsg(null);
       setEditing(false);
+      setFolders(savedFolders.current[serverKey(u)] || {});
       api.setConfig({ url: u, token: t });
     } else if (!quiet) {
       setServer(null);
@@ -142,12 +209,76 @@ export default function App() {
     }
   }, [url, token]);
 
-  const loadFolder = useCallback(async (f) => {
-    setFolder(f);
-    setScan(null);
-    api.setConfig({ folder: f });
-    setScan(await api.scanFolder(f));
+  // -- folders: one for photos in no album, one per album on the server
+  const albums = server?.albums ?? null; // null: the server has no albums yet (older version)
+  const sources = useMemo(() => {
+    const out = folder ? [{ folder, album: null, name: null }] : [];
+    for (const a of albums ?? []) {
+      if (folders[a.id]) out.push({ folder: folders[a.id], album: a.id, name: a.name });
+    }
+    return out;
+  }, [folder, folders, albums]);
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
+
+  const rescan = useCallback(async () => {
+    const list = sourcesRef.current;
+    const entries = await Promise.all(
+      // a folder inside another one is counted by its own row only
+      list.map(async (s) => [s.folder, await api.scanFolder(s.folder, list.map((o) => o.folder).filter((f) => f !== s.folder))])
+    );
+    setScans(Object.fromEntries(entries));
   }, []);
+  const sourceKey = sources.map((s) => s.folder).join('\n');
+  useEffect(() => {
+    rescan();
+  }, [sourceKey, rescan]);
+
+  /** Point an album (null: no album) at a folder, or at none. */
+  const assign = (album, f) => {
+    const owner = f && sources.find((s) => s.folder === f && s.album !== album);
+    if (owner) return flash(`Thư mục này đã dùng cho “${owner.name ?? 'Chưa vào thư mục'}”.`, 'err');
+    if (album == null) {
+      setFolder(f);
+      api.setConfig({ folder: f });
+      return undefined;
+    }
+    const next = { ...folders };
+    if (f) next[album] = f;
+    else delete next[album];
+    setFolders(next);
+    savedFolders.current = { ...savedFolders.current, [serverKey(url)]: next };
+    api.setConfig({ albumFolders: savedFolders.current });
+    return undefined;
+  };
+  const loadFolder = (f) => assign(null, f);
+
+  const pickFor = async (album) => {
+    const f = await api.chooseFolder();
+    if (f) assign(album, f);
+  };
+
+  const dropFor = async (album, file) => {
+    if (!file) return;
+    if (running) return flash('Đang tải lên: dừng trước khi đổi thư mục.', 'err');
+    const p = api.pathFor(file);
+    if ((await api.pathKind(p)) === 'folder') assign(album, p);
+    else flash('Kéo một thư mục ảnh vào đây.', 'err');
+  };
+
+  const createAlbum = async (e) => {
+    e.preventDefault();
+    const name = newAlbum.trim();
+    if (!name) return;
+    setCreating(true);
+    const r = await api.createAlbum(url.trim(), token.trim(), name);
+    setCreating(false);
+    if (!r.ok) return flash(r.error, 'err');
+    setNewAlbum(null);
+    flash(`Đã tạo thư mục “${r.album.name}”. Chọn thư mục ảnh cho nó.`, 'ok');
+    await connect(url, token, true); // the new album joins the list
+    return pickFor(r.album.id);
+  };
 
   useEffect(() => {
     api.init().then((b) => {
@@ -158,7 +289,9 @@ export default function App() {
       setQuality(b.cfg.quality || 'high');
       setLocalFaces(b.cfg.localFaces ?? true);
       setNodeOn(Boolean(b.cfg.nodeMode));
-      if (b.cfg.folder) loadFolder(b.cfg.folder);
+      savedFolders.current = b.cfg.albumFolders || {};
+      setFolders(savedFolders.current[serverKey(b.cfg.url)] || {});
+      if (b.cfg.folder) setFolder(b.cfg.folder);
       if (b.cfg.url && b.cfg.token) connect(b.cfg.url, b.cfg.token);
       if (b.discovered) flash(`Đã tự nhập cấu hình từ ${b.discovered.file.split(/[\\/]/).pop()}`, 'ok');
     });
@@ -240,12 +373,12 @@ export default function App() {
         } else {
           setStatus('Hoàn tất.');
         }
-        if (folder) api.scanFolder(folder).then(setScan);
+        rescan();
         connect(url, token, true);
         break;
       default:
     }
-  }), [folder, url, token, connect, flash]);
+  }), [url, token, connect, flash, rescan]);
 
   const start = async () => {
     if (running) {
@@ -254,14 +387,14 @@ export default function App() {
       return;
     }
     if (!server) return flash('Hãy kết nối máy chủ trước.', 'err');
-    if (!folder) return flash('Hãy chọn thư mục ảnh.', 'err');
+    if (!sources.length) return flash('Hãy chọn thư mục ảnh.', 'err');
     setStats(null);
     setRunning(true);
     setStatus('Đang bắt đầu…');
     const ok = await api.start({
       url: url.trim(),
       token: token.trim(),
-      folder,
+      sources,
       watch,
       quality,
       localFaces: localFaces && faces.state === 'ready',
@@ -290,7 +423,19 @@ export default function App() {
     for (const t of tiles) c[t.status] += 1;
     return c;
   }, [tiles]);
-  const shown = filter === 'all' ? tiles : tiles.filter((t) => t.status === filter);
+  const shown = useMemo(() => (filter === 'all' ? tiles : tiles.filter((t) => t.status === filter)), [tiles, filter]);
+  // tracked by id: new photos arriving at the top do not move the one being looked at
+  const viewIndex = viewing == null ? -1 : shown.findIndex((t) => t.id === viewing);
+  const closeViewer = useCallback(() => setViewing(null), []);
+  const stepViewer = useCallback(
+    (d) =>
+      setViewing((id) => {
+        const next = shown[shown.findIndex((t) => t.id === id) + d];
+        return next ? next.id : id;
+      }),
+    [shown]
+  );
+  const flashError = useCallback((text) => flash(text, 'err'), [flash]);
   const errors = logs.filter((l) => l.level === 'error').length;
 
   const s = stats;
@@ -412,40 +557,87 @@ export default function App() {
           <Card
             title="Thư mục ảnh"
             action={
-              <button
-                type="button"
-                className="btn btn--link"
-                disabled={running}
-                onClick={async () => {
-                  const f = await api.chooseFolder();
-                  if (f) loadFolder(f);
-                }}
-              >
-                {folder ? 'Đổi…' : 'Chọn…'}
-              </button>
+              albums ? (
+                <button
+                  type="button"
+                  className="btn btn--link"
+                  disabled={running || newAlbum !== null}
+                  onClick={() => setNewAlbum('')}
+                >
+                  + Thư mục mới
+                </button>
+              ) : (
+                <button type="button" className="btn btn--link" disabled={running} onClick={() => pickFor(null)}>
+                  {folder ? 'Đổi…' : 'Chọn…'}
+                </button>
+              )
             }
           >
-            {folder ? (
+            {newAlbum !== null && (
+              <form className="newalbum" onSubmit={createAlbum}>
+                <input
+                  autoFocus
+                  value={newAlbum}
+                  maxLength={60}
+                  placeholder="Tên thư mục, VD: Gala Dinner"
+                  disabled={creating}
+                  onChange={(e) => setNewAlbum(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Escape' && setNewAlbum(null)}
+                />
+                <button type="submit" className="btn btn--primary" disabled={creating || !newAlbum.trim()}>
+                  {creating ? 'Đang tạo…' : 'Tạo'}
+                </button>
+                <button type="button" className="btn btn--link" onClick={() => setNewAlbum(null)}>
+                  Huỷ
+                </button>
+              </form>
+            )}
+            {albums ? (
+              <>
+                <ul className="sources">
+                  <SourceRow
+                    label="Chưa vào thư mục"
+                    hint="Ảnh chỉ nằm trong Tất cả ảnh"
+                    folder={folder}
+                    scan={scans[folder]}
+                    disabled={running}
+                    onPick={() => pickFor(null)}
+                    onClear={() => assign(null, null)}
+                    onDropFile={(f) => dropFor(null, f)}
+                    onOver={setRowDrag}
+                  />
+                  {albums.map((a) => (
+                    <SourceRow
+                      key={a.id}
+                      label={a.name}
+                      hint={`${num(a.photos)} ảnh trên máy chủ · chưa chọn thư mục ảnh`}
+                      folder={folders[a.id]}
+                      scan={scans[folders[a.id]]}
+                      disabled={running}
+                      onPick={() => pickFor(a.id)}
+                      onClear={() => assign(a.id, null)}
+                      onDropFile={(f) => dropFor(a.id, f)}
+                      onOver={setRowDrag}
+                    />
+                  ))}
+                </ul>
+                {albums.length === 0 && (
+                  <p className="hint">
+                    Tạo thư mục (VD: Lễ khai mạc, Gala dinner) để khách lọc ảnh theo từng phần của sự kiện. Mỗi thư
+                    mục chọn một thư mục ảnh riêng trên máy này.
+                  </p>
+                )}
+              </>
+            ) : folder ? (
               <div className="folder">
                 <strong title={folder}>{folder.split(/[\\/]/).filter(Boolean).pop()}</strong>
                 <span className="muted" title={folder}>
                   {tail(folder)}
                 </span>
-                <span className="folder__sum">
-                  {scan
-                    ? `${num(scan.total)} ảnh · ${size(scan.bytes)} · ${num(scan.todo)} chưa gửi`
-                    : 'Đang đếm ảnh…'}
-                </span>
+                <span className="folder__sum">{scanText(scans[folder])}</span>
               </div>
             ) : (
-              <button
-                type="button"
-                className="dropzone"
-                onClick={async () => {
-                  const f = await api.chooseFolder();
-                  if (f) loadFolder(f);
-                }}
-              >
+              <button type="button" className="dropzone" onClick={() => pickFor(null)}>
                 <strong>Chọn thư mục ảnh</strong>
                 <span>hoặc kéo thả thư mục vào cửa sổ</span>
               </button>
@@ -649,8 +841,8 @@ export default function App() {
                     key={t.id}
                     type="button"
                     className="tile"
-                    title={`${t.name}${t.error ? ` · ${t.error}` : ''}\nBấm để mở trong thư mục`}
-                    onClick={() => api.reveal(t.file)}
+                    title={`${t.name}${t.error ? ` · ${t.error}` : ''}\nBấm để xem ảnh và khuôn mặt`}
+                    onClick={() => setViewing(t.id)}
                   >
                     {t.thumb ? <img src={t.thumb} alt="" draggable={false} /> : <span className="tile__none">Không xem trước được</span>}
                     <span className={`badge is-${STATUS[t.status].tone}`}>{STATUS[t.status].label}</span>
@@ -659,7 +851,10 @@ export default function App() {
                         {t.faces} mặt
                       </span>
                     )}
-                    <span className="tile__name">{t.name}</span>
+                    <span className="tile__name">
+                      {t.album && <b>{t.album} · </b>}
+                      {t.name}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -700,11 +895,27 @@ export default function App() {
         </div>
       </main>
 
-      {dragging && (
+      {viewIndex >= 0 && (
+        <Viewer
+          tile={shown[viewIndex]}
+          index={viewIndex}
+          total={shown.length}
+          badge={STATUS[shown[viewIndex].status]}
+          revealLabel={boot.platform === 'darwin' ? 'Hiện trong Finder' : 'Hiện trong thư mục'}
+          onClose={closeViewer}
+          onStep={stepViewer}
+          onError={flashError}
+        />
+      )}
+      {dragging && !rowDrag && (
         <div className="dropveil">
           <div>
             <strong>Thả vào đây</strong>
-            <span>Thư mục ảnh để tải lên, hoặc file cấu hình .json</span>
+            <span>
+              {albums?.length
+                ? 'Thư mục ảnh chưa vào thư mục nào, hoặc file cấu hình .json. Thả lên một dòng ở Thư mục ảnh để gửi vào thư mục đó.'
+                : 'Thư mục ảnh để tải lên, hoặc file cấu hình .json'}
+            </span>
           </div>
         </div>
       )}

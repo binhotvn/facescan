@@ -388,6 +388,92 @@ input {
   }
 }
 
+/* one row per album: its name, and the folder on this machine that feeds it */
+.sources {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: var(--ds-border-width) solid var(--ds-border);
+  border-radius: var(--ds-radius-small);
+}
+
+.source {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-100);
+  min-width: 0;
+  padding: var(--ds-space-100) var(--ds-space-150);
+
+  & + & {
+    border-top: var(--ds-border-width) solid var(--ds-border);
+  }
+
+  &.is-over {
+    background: var(--ds-background-selected);
+    box-shadow: inset 0 0 0 2px var(--ds-border-brand);
+  }
+}
+
+.source__main {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+
+  strong,
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    font-weight: var(--ds-font-weight-semibold);
+  }
+}
+
+.source__path {
+  font: var(--ds-font-body-small);
+  color: var(--ds-text-subtle);
+}
+
+.source__sum,
+.source__hint {
+  font: var(--ds-font-body-small);
+  color: var(--ds-text-subtlest);
+}
+
+.source:not(.is-set) strong {
+  color: var(--ds-text-subtle);
+}
+
+.source__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--ds-space-100);
+}
+
+.source__clear {
+  font: var(--ds-font-body-small);
+}
+
+.newalbum {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-100);
+  margin-bottom: var(--ds-space-150);
+
+  input {
+    flex: 1;
+    height: 32px;
+  }
+}
+
+.sources + .hint {
+  margin-top: var(--ds-space-100);
+}
+
 .field {
   display: grid;
   gap: var(--ds-space-075);
@@ -836,6 +922,11 @@ input {
   white-space: nowrap;
 }
 
+.tile__name b {
+  color: var(--ds-text);
+  font-weight: var(--ds-font-weight-semibold);
+}
+
 /* ADS empty state */
 .empty {
   display: grid;
@@ -919,6 +1010,130 @@ input {
 
   &.is-error span {
     color: var(--ds-text-danger);
+  }
+}
+
+/* --- photo viewer: ADS modal over a blanket ---------------------------------------- */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  padding: var(--ds-space-400);
+  background: var(--ds-blanket);
+}
+
+.viewer__panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--ds-radius-large);
+  background: var(--ds-surface-overlay);
+  box-shadow: var(--ds-shadow-overlay);
+}
+
+.viewer__head {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-100);
+  min-width: 0;
+  padding: var(--ds-space-150) var(--ds-space-200);
+  border-bottom: var(--ds-border-width) solid var(--ds-border);
+}
+
+.viewer__name {
+  overflow: hidden;
+  font: var(--ds-font-heading-xsmall);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer__actions {
+  display: flex;
+  flex: none;
+  gap: var(--ds-space-075);
+  margin-left: auto;
+}
+
+.viewer__error {
+  padding: var(--ds-space-100) var(--ds-space-200);
+  background: var(--ds-background-danger);
+  color: var(--ds-text-danger);
+}
+
+/* sized from its own box, so the photo fits whole and the face boxes sit on it */
+.viewer__stage {
+  display: grid;
+  flex: 1 1 0; /* size containment: it must get its height from the panel, not its content */
+  place-items: center;
+  min-height: 0;
+  padding: var(--ds-space-200);
+  background: var(--ds-surface-sunken);
+  container-type: size;
+}
+
+.viewer__frame {
+  position: relative;
+  width: min(100cqw, 100cqh * var(--ar));
+  aspect-ratio: var(--ar);
+
+  img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: var(--ds-radius-small);
+  }
+}
+
+.viewer__box {
+  position: absolute;
+  border: 2px solid var(--ds-border-inverse);
+  border-radius: var(--ds-radius-small);
+  /* a dark hairline keeps the box readable on light skin and bright walls */
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+
+  &.is-hot {
+    z-index: 1;
+    border: 3px solid var(--ds-border-selected);
+    background: var(--ds-blanket-selected);
+  }
+}
+
+.viewer__faces {
+  display: grid;
+  gap: var(--ds-space-100);
+  padding: var(--ds-space-150) var(--ds-space-200) var(--ds-space-200);
+  border-top: var(--ds-border-width) solid var(--ds-border);
+}
+
+.viewer__strip {
+  display: flex;
+  gap: var(--ds-space-100);
+  overflow-x: auto;
+  padding: var(--ds-space-050);
+}
+
+.viewer__face {
+  flex: none;
+  width: 72px;
+  height: 72px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ds-radius-large);
+  background: var(--ds-background-neutral);
+
+  img {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  &.is-hot,
+  &:focus-visible {
+    outline: 2px solid var(--ds-border-selected);
+    outline-offset: 2px;
   }
 }
 

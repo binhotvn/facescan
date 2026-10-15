@@ -1,7 +1,8 @@
 'use strict';
 /**
- * The upload engine: finds photos in a folder, compresses them, and pushes them
- * to a FaceScan server's /api/upload in batches.
+ * The upload engine: finds photos in one or more folders, compresses them, and
+ * pushes them to a FaceScan server's /api/upload in batches. Each folder can
+ * feed an album on the server ("Lễ khai mạc", "Gala dinner"...).
  *
  * Kept free of Electron so it can be tested with plain `node --test`.
  *
@@ -41,9 +42,13 @@ const QUALITY = {
 // --------------------------------------------------------------------------
 // files
 // --------------------------------------------------------------------------
-/** Every photo under root, sorted like upload.py (by full path). */
-async function listImages(root) {
+/**
+ * Every photo under root, sorted like upload.py (by full path). Folders in
+ * `skip` are left out: another source feeds them into their own album.
+ */
+async function listImages(root, skip = []) {
   const out = [];
+  const skipped = new Set(skip.map((d) => path.resolve(d)));
   async function walk(dir) {
     let entries;
     try {
@@ -54,8 +59,9 @@ async function listImages(root) {
     for (const e of entries) {
       if (e.name.startsWith('.')) continue;
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) await walk(p);
-      else if (e.isFile() && IMAGE_EXTS.has(path.extname(e.name).toLowerCase())) out.push(p);
+      if (e.isDirectory()) {
+        if (!skipped.has(path.resolve(p))) await walk(p);
+      } else if (e.isFile() && IMAGE_EXTS.has(path.extname(e.name).toLowerCase())) out.push(p);
     }
   }
   await walk(root);
@@ -196,6 +202,46 @@ async function prepare(file, preset, { thumbSize = 320 } = {}) {
   return { data, name, thumb };
 }
 
+/** A viewing copy of a photo for the window: upright, long edge capped. */
+async function preview(file, edge = 2048) {
+  const { data, info } = await getSharp()(file, { failOn: 'none' })
+    .rotate()
+    .resize(edge, edge, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer({ resolveWithObject: true });
+  return { src: `data:image/jpeg;base64,${data.toString('base64')}`, width: info.width, height: info.height };
+}
+
+/**
+ * Each face cut from the original at full resolution, square, with some hair
+ * and chin around the box. Boxes are in the sent photo's pixels (w x h), which
+ * may be a downscaled copy of the original.
+ */
+async function faceCrops(file, boxes, w, h, size = 144) {
+  const s = getSharp();
+  // decode once: every crop comes from the same upright pixels
+  const { data, info } = await s(file, { failOn: 'none' }).rotate().raw().toBuffer({ resolveWithObject: true });
+  const raw = { raw: { width: info.width, height: info.height, channels: info.channels } };
+  const kx = info.width / w;
+  const ky = info.height / h;
+  return Promise.all(
+    boxes.map(async ([x0, y0, x1, y1]) => {
+      const side = Math.max((x1 - x0) * kx, (y1 - y0) * ky) * 1.4;
+      // a face at the edge gets a crop clamped to the photo
+      const left = Math.min(info.width - 1, Math.max(0, Math.round(((x0 + x1) / 2) * kx - side / 2)));
+      const top = Math.min(info.height - 1, Math.max(0, Math.round(((y0 + y1) / 2) * ky - side / 2)));
+      const region = {
+        left,
+        top,
+        width: Math.max(1, Math.min(info.width - left, Math.round(side))),
+        height: Math.max(1, Math.min(info.height - top, Math.round(side))),
+      };
+      const crop = await s(data, raw).extract(region).resize(size, size, { fit: 'cover' }).jpeg({ quality: 85 }).toBuffer();
+      return `data:image/jpeg;base64,${crop.toString('base64')}`;
+    })
+  );
+}
+
 // --------------------------------------------------------------------------
 // HTTP
 // --------------------------------------------------------------------------
@@ -217,9 +263,12 @@ const agents = {
  * Content-Length is exact (some proxies refuse chunked uploads) and progress
  * can count bytes as the socket takes them.
  */
-function postBatch(baseUrl, token, files, { timeoutMs = 900_000, onBytes = () => {}, signal } = {}) {
+function postBatch(baseUrl, token, files, { timeoutMs = 900_000, onBytes = () => {}, signal, album = null } = {}) {
   const boundary = `----kapok${crypto.randomBytes(12).toString('hex')}`;
   const parts = [];
+  if (album != null) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="album"\r\n\r\n${album}\r\n`));
+  }
   for (const f of files) {
     const type = f.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
     const safe = f.name.replace(/["\r\n]/g, '_');
@@ -297,6 +346,7 @@ function explain(err) {
     if (err.status === 401) return 'Sai mã tải lên (401).';
     if (err.status === 413) return 'Lô ảnh quá lớn (413).';
     if (err.status === 503 && err.detail) return `Máy chủ tắt tải ảnh lên: ${err.detail}`;
+    if (err.status === 404 && err.detail) return err.detail; // e.g. the album was deleted
     return err.message;
   }
   if (err?.code === 'ETIMEDOUT') return 'Quá thời gian chờ máy chủ';
@@ -318,15 +368,45 @@ function isFatal(err) {
 // --------------------------------------------------------------------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The folders to send: [{folder, album, name}], album null for none. A folder
+ * listed twice goes once, under the first album it was given.
+ */
+function normalizeSources(sources, folder) {
+  const list = sources?.length ? sources : [{ folder, album: null }];
+  const seen = new Set();
+  const out = [];
+  for (const s of list) {
+    const key = path.resolve(s.folder);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ folder: s.folder, album: s.album ?? null, name: s.name || null });
+  }
+  // each folder leaves out any other source's folder inside it
+  for (const s of out) {
+    s.skip = out.filter((o) => o !== s && isInside(o.folder, s.folder)).map((o) => o.folder);
+  }
+  return out;
+}
+
+function isInside(child, parent) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 class Uploader extends EventEmitter {
   /**
    * Events: 'status' (text), 'log' ({level, msg}), 'sent' ({file, name, status,
-   * error, thumb}), 'stats' (snapshot), 'done' ({fatal}).
+   * error, thumb, album}), 'stats' (snapshot), 'done' ({fatal}).
+   *
+   * `sources` lists the folders to send, each into its album; `folder` alone
+   * is the same as one source with no album.
    */
   constructor({
     url,
     token,
     folder,
+    sources = null,
     watch = false,
     quality = 'high',
     workers = 3,
@@ -339,12 +419,17 @@ class Uploader extends EventEmitter {
     analyze = null, // async (bytes) => {signature, faces, ms}: index on this machine
   }) {
     super();
-    Object.assign(this, { url, token, folder, watch, quality, workers, batch, retries });
+    Object.assign(this, { url, token, watch, quality, workers, batch, retries });
     Object.assign(this, { timeoutMs, interval, settleMs, post, analyze });
-    this.state = new State(path.join(folder, STATE_NAME));
+    // one state file per folder, the same one upload.py keeps there
+    this.sources = normalizeSources(sources, folder).map((s) => ({
+      ...s,
+      state: new State(path.join(s.folder, STATE_NAME)),
+    }));
     this.stats = {
       found: 0,
       queued: 0,
+      prepared: 0, // hashed, compressed and (when on) indexed here, ready to send
       uploaded: 0,
       duplicates: 0,
       skipped: 0,
@@ -393,24 +478,43 @@ class Uploader extends EventEmitter {
     return { ...s, done, rate: elapsed > 0.5 ? done / elapsed : 0, mbps: elapsed > 0.5 ? s.bytesSent / elapsed / 1e6 : 0 };
   }
 
+  /**
+   * Preparing a photo (and finding its faces here) takes seconds, and nothing
+   * goes on the wire until a batch is ready: count it, so the run never looks stuck.
+   */
+  _progress() {
+    if (this.stopped || this.fatal) return;
+    const { prepared, queued } = this.stats;
+    if (prepared < queued) {
+      const work = this.analyze ? 'Đang nén và nhận diện khuôn mặt' : 'Đang nén';
+      this.status(`${work} ${prepared}/${queued} ảnh…`);
+    } else {
+      this.status('Đang gửi lên máy chủ…');
+    }
+  }
+
   stop() {
     this.stopped = true;
     if (!this.fatal) this.fatal = 'stopped';
     this.status('Đang dừng…');
   }
 
-  // -- one pass over a list of files
+  _saveStates() {
+    for (const s of this.sources) s.state.save();
+  }
+
+  // -- one pass over a list of files ({file, src})
   async _plan(files) {
     const todo = [];
-    for (const f of files) {
+    for (const { file, src } of files) {
       let stat;
       try {
-        stat = await fsp.stat(f);
+        stat = await fsp.stat(file);
       } catch {
         continue;
       }
-      if (this.state.knownHash(f, stat)) this._add({ skipped: 1 });
-      else todo.push({ file: f, size: stat.size });
+      if (src.state.knownHash(file, stat)) this._add({ skipped: 1 });
+      else todo.push({ file, src, size: stat.size });
     }
     return todo;
   }
@@ -420,7 +524,11 @@ class Uploader extends EventEmitter {
     let cur = [];
     let bytes = 0;
     for (const it of items) {
-      if (cur.length && (cur.length >= this.batch || bytes + it.size > MAX_BATCH_BYTES)) {
+      // the first photo goes alone: something reaches the server within seconds
+      const cap = out.length ? this.batch : 1;
+      // one request carries one album
+      const full = cur.length >= cap || bytes + it.size > MAX_BATCH_BYTES || it.src !== cur[0]?.src;
+      if (cur.length && full) {
         out.push(cur);
         cur = [];
         bytes = 0;
@@ -437,19 +545,20 @@ class Uploader extends EventEmitter {
     const ready = [];
     for (const it of group) {
       if (this.fatal) return ready;
+      this._progress();
       let stat;
       let digest;
       try {
         stat = await fsp.stat(it.file);
         digest = await hashFile(it.file);
       } catch (e) {
-        this._add({ failed: 1 });
+        this._add({ failed: 1, prepared: 1 });
         this.log(`${path.basename(it.file)}: ${e.message}`, 'error');
-        this.emit('sent', { file: it.file, name: path.basename(it.file), status: 'failed', error: e.message });
+        this.emit('sent', { file: it.file, name: path.basename(it.file), album: it.src.name, status: 'failed', error: e.message });
         continue;
       }
-      if (this.state.seen(digest) || this.inFlight.has(digest)) {
-        this.state.notePath(it.file, stat, digest);
+      if (it.src.state.seen(digest) || this.inFlight.has(digest)) {
+        it.src.state.notePath(it.file, stat, digest);
         this._add({ skipped: 1, queued: -1 });
         continue;
       }
@@ -466,14 +575,15 @@ class Uploader extends EventEmitter {
           }
         }
         ready.push({ ...it, stat, digest, ...prep, faces });
-        this._add({ originalBytes: stat.size, bytesQueued: prep.data.length });
+        this._add({ originalBytes: stat.size, bytesQueued: prep.data.length, prepared: 1 });
       } catch (e) {
         this.inFlight.delete(digest);
-        this._add({ failed: 1 });
+        this._add({ failed: 1, prepared: 1 });
         this.log(`${path.basename(it.file)}: không đọc được ảnh`, 'error');
-        this.emit('sent', { file: it.file, name: path.basename(it.file), status: 'failed', error: 'Không đọc được ảnh' });
+        this.emit('sent', { file: it.file, name: path.basename(it.file), album: it.src.name, status: 'failed', error: 'Không đọc được ảnh' });
       }
     }
+    this._progress();
     return ready;
   }
 
@@ -483,6 +593,7 @@ class Uploader extends EventEmitter {
       let sentNow = 0;
       try {
         const result = await this.post(this.url, this.token, items, {
+          album: items[0].src.album,
           timeoutMs: this.timeoutMs,
           onBytes: (n) => {
             sentNow += n;
@@ -513,9 +624,7 @@ class Uploader extends EventEmitter {
         if (attempt === this.retries) {
           this._add({ failed: items.length });
           this.log(`Bỏ qua ${items.length} ảnh: ${why}`, 'error');
-          for (const it of items) {
-            this.emit('sent', { file: it.file, name: path.basename(it.file), status: 'failed', error: why, thumb: it.thumb });
-          }
+          for (const it of items) this.emit('sent', { ...this._shown(it), status: 'failed', error: why });
           return this._release(items);
         }
         const wait = Math.min(2 ** attempt, 30);
@@ -529,6 +638,22 @@ class Uploader extends EventEmitter {
     for (const it of items) this.inFlight.delete(it.digest);
   }
 
+  /** What the window shows for a photo: its preview, and the faces found here (null if none ran). */
+  _shown(it) {
+    const f = it.faces;
+    return {
+      file: it.file,
+      name: path.basename(it.file),
+      album: it.src.name,
+      thumb: it.thumb,
+      faces: f ? f.faces.length : null,
+      // boxes are in the sent photo's pixels, so they need its size to be drawn
+      boxes: f ? f.faces.map((x) => x.bbox) : null,
+      width: f?.width ?? null,
+      height: f?.height ?? null,
+    };
+  }
+
   _record(items, result) {
     // the server answers in the order the files were sent
     const photos = result.photos || [];
@@ -536,29 +661,28 @@ class Uploader extends EventEmitter {
       const entry = photos[i] || {};
       const name = path.basename(it.file);
       if (entry.ok) {
-        this.state.mark(it.file, it.stat, it.digest);
+        it.src.state.mark(it.file, it.stat, it.digest);
         const status = entry.duplicate ? 'duplicate' : 'uploaded';
         this._add(entry.duplicate ? { duplicates: 1 } : { uploaded: 1 });
         if (entry.indexed) this._add({ indexedHere: 1 });
-        const faces = it.faces ? it.faces.faces.length : null;
-        this.emit('sent', { file: it.file, name, status, thumb: it.thumb, faces, indexedHere: Boolean(entry.indexed) });
+        this.emit('sent', { ...this._shown(it), status, indexedHere: Boolean(entry.indexed) });
       } else {
         this._add({ failed: 1 });
         this.log(`${name}: ${entry.error || 'bị từ chối'}`, 'error');
-        this.emit('sent', { file: it.file, name, status: 'failed', error: entry.error || 'Bị từ chối', thumb: it.thumb });
+        this.emit('sent', { ...this._shown(it), status: 'failed', error: entry.error || 'Bị từ chối' });
       }
       this.inFlight.delete(it.digest);
     });
     if (typeof result.pending === 'number') this._add({ pending: result.pending - this.stats.pending });
-    this.state.save();
+    items[0]?.src.state.save();
   }
 
-  /** Upload a list of files with `workers` batches in flight. False if stopped by an error. */
+  /** Upload a list of {file, src} with `workers` batches in flight. False if stopped by an error. */
   async runFiles(files) {
     const todo = await this._plan(files);
     if (!todo.length) return !this.fatal;
     this._add({ queued: todo.length });
-    this.status(`Đang gửi ${todo.length} ảnh…`);
+    this._progress();
     const groups = this._groups(todo);
     let next = 0;
     // Each worker prepares its next batch while the others upload theirs:
@@ -572,28 +696,41 @@ class Uploader extends EventEmitter {
       }
     };
     await Promise.all(Array.from({ length: Math.min(this.workers, groups.length) }, worker));
-    this.state.save();
+    this._saveStates();
     return !this.fatal;
+  }
+
+  /** Every photo in every source folder, tagged with where it goes. */
+  async _list() {
+    const out = [];
+    for (const src of this.sources) {
+      for (const file of await listImages(src.folder, src.skip)) out.push({ file, src });
+    }
+    return out;
   }
 
   async run() {
     try {
-      this.status('Đang quét thư mục…');
-      const files = await listImages(this.folder);
+      this.status(this.sources.length > 1 ? `Đang quét ${this.sources.length} thư mục…` : 'Đang quét thư mục…');
+      const files = await this._list();
       this._add({ found: files.length });
       let ok = await this.runFiles(files);
       while (ok && this.watch && !this.stopped) {
-        this.status(`Đang theo dõi thư mục, ảnh mới sẽ tự gửi`);
+        this.status(
+          this.sources.length > 1
+            ? `Đang theo dõi ${this.sources.length} thư mục, ảnh mới sẽ tự gửi`
+            : 'Đang theo dõi thư mục, ảnh mới sẽ tự gửi'
+        );
         this.emit('stats', this.snapshot());
         await sleep(this.interval);
         if (this.stopped) break;
         const now = Date.now();
         const fresh = [];
-        for (const f of await listImages(this.folder)) {
+        for (const f of await this._list()) {
           try {
-            const st = await fsp.stat(f);
+            const st = await fsp.stat(f.file);
             // a file still being copied in must stop growing first
-            if (now - st.mtimeMs >= this.settleMs && !this.state.knownHash(f, st)) fresh.push(f);
+            if (now - st.mtimeMs >= this.settleMs && !f.src.state.knownHash(f.file, st)) fresh.push(f);
           } catch {
             /* vanished between listing and stat */
           }
@@ -604,7 +741,7 @@ class Uploader extends EventEmitter {
       this.fatal = this.fatal || e.message;
       this.log(`Lỗi: ${e.message}`, 'error');
     } finally {
-      this.state.save();
+      this._saveStates();
       clearTimeout(this._statsTimer);
       this.emit('stats', this.snapshot());
       this.emit('done', { fatal: this.fatal === 'stopped' ? null : this.fatal, stopped: this.stopped });
@@ -615,12 +752,12 @@ class Uploader extends EventEmitter {
 // --------------------------------------------------------------------------
 // folder summary, server, connection file
 // --------------------------------------------------------------------------
-async function scanFolder(folder) {
+async function scanFolder(folder, skip = []) {
   const state = new State(path.join(folder, STATE_NAME));
   let total = 0;
   let todo = 0;
   let bytes = 0;
-  for (const f of await listImages(folder)) {
+  for (const f of await listImages(folder, skip)) {
     let st;
     try {
       st = await fsp.stat(f);
@@ -634,9 +771,11 @@ async function scanFolder(folder) {
   return { total, todo, bytes };
 }
 
-async function apiGet(base, p, token, timeoutMs = 15_000) {
+async function apiGet(base, p, token, timeoutMs = 15_000, { method = 'GET', body } = {}) {
   const res = await fetch(base.replace(/\/+$/, '') + p, {
-    headers: { 'X-Upload-Token': token },
+    method,
+    headers: { 'X-Upload-Token': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
@@ -670,13 +809,24 @@ async function fetchServer(base, token) {
     apiGet(base, '/api/upload/check', token),
     apiGet(base, '/api/stats', token),
   ]);
-  let storage = null;
+  // an older server has neither: the window then hides what needs them
+  const optional = (p) =>
+    apiGet(base, p, token).catch((e) => {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    });
+  const [storage, albums] = await Promise.all([optional('/api/admin/storage'), optional('/api/albums')]);
+  return { limits, stats, storage, albums: albums?.albums ?? null };
+}
+
+/** Make an album on the server; it answers with {id, name, photos}. */
+async function createAlbum(base, token, name) {
   try {
-    storage = await apiGet(base, '/api/admin/storage', token);
+    return await apiGet(base, '/api/albums', token, 15_000, { method: 'POST', body: { name } });
   } catch (e) {
-    if (!(e instanceof HttpError && e.status === 404)) throw e; // an older server has none
+    if (e instanceof HttpError && e.detail) throw new Error(e.detail); // e.g. the name is taken
+    throw e;
   }
-  return { limits, stats, storage };
 }
 
 /** A connection file from the admin page: {"url": ..., "token": ...}. */
@@ -708,6 +858,8 @@ module.exports = {
   hashFile,
   State,
   prepare,
+  preview,
+  faceCrops,
   postBatch,
   HttpError,
   explain,
@@ -715,6 +867,7 @@ module.exports = {
   Uploader,
   scanFolder,
   fetchServer,
+  createAlbum,
   describeError,
   readServerFile,
 };

@@ -195,7 +195,7 @@ ipcMain.handle('path:kind', (_e, p) => {
   return 'other';
 });
 
-ipcMain.handle('folder:scan', (_e, folder) => U.scanFolder(folder));
+ipcMain.handle('folder:scan', (_e, folder, skip) => U.scanFolder(folder, skip));
 
 ipcMain.handle('server:fetch', async (_e, url, token) => {
   try {
@@ -205,9 +205,17 @@ ipcMain.handle('server:fetch', async (_e, url, token) => {
   }
 });
 
+ipcMain.handle('album:create', async (_e, url, token, name) => {
+  try {
+    return { ok: true, album: await U.createAlbum(url, token, name) };
+  } catch (e) {
+    return { ok: false, error: e instanceof U.HttpError ? U.describeError(e) : e.message };
+  }
+});
+
 ipcMain.handle('upload:start', (_e, opts) => {
   if (uploader) return false;
-  saveConfig({ folder: opts.folder, watch: opts.watch, quality: opts.quality });
+  saveConfig({ watch: opts.watch, quality: opts.quality }); // the folders are saved as they are picked
   const analyze = opts.localFaces && faceService.worker ? (d) => faceService.analyze(d) : null;
   uploader = new U.Uploader({ ...opts, analyze });
   awake(true);
@@ -272,6 +280,32 @@ ipcMain.handle('node:stop', () => queueNode?.stop());
 
 ipcMain.handle('upload:stop', () => {
   uploader?.stop();
+});
+
+// the window can only ask for photos, never any other file on the machine
+const isPhoto = (file) => typeof file === 'string' && U.IMAGE_EXTS.has(path.extname(file).toLowerCase());
+
+ipcMain.handle('photo:preview', async (_e, file) => {
+  if (!isPhoto(file)) return null;
+  try {
+    return await U.preview(file);
+  } catch {
+    return null; // moved or deleted since it went up
+  }
+});
+
+ipcMain.handle('photo:faces', async (_e, file, boxes, w, h) => {
+  if (!isPhoto(file) || !Array.isArray(boxes) || boxes.length > 500 || !(w > 0 && h > 0)) return null;
+  try {
+    return await U.faceCrops(file, boxes, w, h);
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('shell:openFile', async (_e, file) => {
+  if (!isPhoto(file)) return 'Không phải file ảnh.';
+  return shell.openPath(file); // '' when it opened, else why not
 });
 
 ipcMain.handle('shell:reveal', (_e, file) => shell.showItemInFolder(file));
