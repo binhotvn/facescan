@@ -161,11 +161,14 @@ How it stays consistent:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/photos?limit=&offset=` | Whole gallery, newest first (`total`, `photos[].url/thumb/medium/w/h`) |
+| `GET /api/photos?limit=&offset=&album=` | Gallery, newest first (`total`, `photos[].url/thumb/medium/w/h/album`); `album=<id>` narrows to one album, `album=0` to photos in none |
+| `GET /api/albums` | Albums in display order with photo counts, plus how many photos are in none |
+| `POST /api/albums`, `PATCH`/`DELETE /api/albums/{id}`, `PUT /api/albums/order` | Make, rename, delete (photos stay, unsorted) and reorder albums. Upload token |
+| `POST /api/photos/album` | `{ids, album}`: move photos into an album (`null`: out of any). Upload token |
 | `GET /api/upload/check` | Validate an upload token (`X-Upload-Token`); returns batch and size limits |
 | `GET /api/models` | Model manifest + signature for on-device indexing (upload token) |
 | `GET /api/models/{role}` | The `detection` (fixed 1024x1024 copy) or `recognition` model file |
-| `POST /api/upload` | Push event photos in (multipart `files`); each is indexed before the response. Requires `X-Upload-Token` |
+| `POST /api/upload` | Push event photos in (multipart `files`, optional `album` id); indexed in the background. Requires `X-Upload-Token` |
 | `POST /api/download-zip` | Bundle a list of photo paths into one `.zip` |
 | `GET /photo?path=&size=sm\|md\|full&download=1` | Serve a photo: 480px grid preview, 1600px viewer copy, or the original |
 | `POST /api/search` | Upload a portrait, get matching photos with scores |
@@ -174,6 +177,8 @@ How it stays consistent:
 
 The UI is Vietnamese and gallery-first: every indexed photo is shown on load,
 and uploading a portrait (or using the camera) filters the grid down to matches.
+Albums ("Lễ khai mạc", "Gala dinner"...) show as chips under the title once they
+hold photos; `/?album=<id>` links straight to one.
 Match strictness is server-side (`FACESCAN_THRESHOLD`), not a user-facing control.
 
 ## Image sizes
@@ -236,6 +241,11 @@ per-file result (received, already have it, or the error), and offers a retry
 for anything lost to a dropped connection. The token is checked against
 `GET /api/upload/check` and remembered in that browser until **Đăng xuất**.
 
+Albums are managed on the **Thư mục** tab (make, rename, reorder, delete:
+deleting keeps the photos). **Tải vào thư mục** picks the album new uploads go
+into, and **Quản lý ảnh** filters by album and moves selected photos between
+them. A photo sent again into an album joins it if it was in none yet.
+
 ### Kapok Uploader: the desktop app (macOS / Windows)
 
 `desktop/` is an Electron app for photographers: pick a folder (or drag it in),
@@ -261,6 +271,10 @@ Nothing to install, no Python. Tag `desktop-v1.2.3` to publish a release.
 - **Node mode:** a switch turns the machine into a worker for the server's
   backlog (the `/api/worker/*` API, same leases as `worker.py`), with the
   upload token.
+- **One folder per album:** once the server has albums, each one gets its own
+  row with a folder on this machine (plus one for photos in no album); **+ Thư
+  mục mới** makes an album and asks for its folder. A mapped folder inside
+  another is left to its own album. Remembered per server.
 - Shares `upload.py`'s state file, so a folder sent from either is not re-sent.
 
 Unsigned builds show one warning on first open (macOS: right-click → Open;

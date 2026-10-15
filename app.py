@@ -128,8 +128,9 @@ def healthz():
 def api_stats():
     conn = db.connect()
     s = db.stats(conn)
+    albums = db.list_albums(conn)
     conn.close()
-    return {**s, "pending": _pending(),
+    return {**s, "pending": _pending(), "albums": albums,
             "event": {"name": EVENT_NAME, "date": EVENT_DATE}}
 
 
@@ -148,18 +149,23 @@ def _photo_urls(path: str) -> dict:
 def api_photos(
     limit: int = Query(120, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    album: int | None = Query(None, ge=0),
 ):
-    """The whole gallery, newest first — what the app shows before any search."""
+    """The gallery, newest first — what the app shows before any search.
+
+    `album` narrows it to one album; 0 means the photos in none.
+    """
     conn = db.connect()
-    rows = db.list_photos(conn, limit, offset)
-    total = db.stats(conn)["photos"]
+    rows = db.list_photos(conn, limit, offset, album)
+    total = db.count_photos(conn, album)
     conn.close()
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
         "photos": [
-            dict(_photo_urls(r["path"]), id=r["id"], w=r["w"], h=r["h"], faces=r["n_faces"])
+            dict(_photo_urls(r["path"]), id=r["id"], w=r["w"], h=r["h"], faces=r["n_faces"],
+                 album=r["album"])
             for r in rows
         ],
     }
@@ -606,6 +612,7 @@ def _client_faces(raw: str | None, count: int) -> list:
 def api_upload(
     files: list[UploadFile] = File(...),
     faces: str | None = Form(default=None),
+    album: int | None = Form(default=None),
     x_upload_token: str | None = Header(default=None),
 ):
     """Photographers push event photos in.
@@ -614,8 +621,9 @@ def api_upload(
     indexing happens on a background worker, so a batch of crowd photos cannot
     time out the request. An uploader that indexed the photos itself sends the
     faces along (`faces`, one JSON entry per file, signed for this server's
-    models); those photos are searchable at once and skip the queue. Guarded
-    by FACESCAN_UPLOAD_TOKEN.
+    models); those photos are searchable at once and skip the queue. `album`
+    files the batch into that album; a photo already here and still unsorted
+    joins it too. Guarded by FACESCAN_UPLOAD_TOKEN.
     """
     _require_upload_token(x_upload_token)
     if not files:
@@ -624,9 +632,12 @@ def api_upload(
         raise HTTPException(413, f"Tối đa {MAX_UPLOAD_BATCH} ảnh mỗi lần.")
     precomputed = _client_faces(faces, len(files))
 
+    conn = db.connect()
+    if album is not None and db.get_album(conn, album) is None:
+        conn.close()
+        raise HTTPException(404, _ALBUM_GONE)
     dest_dir = PHOTOS_DIR / UPLOAD_SUBDIR
     dest_dir.mkdir(parents=True, exist_ok=True)
-    conn = db.connect()
     results, accepted, duplicates = [], 0, 0
 
     try:
@@ -641,6 +652,8 @@ def api_upload(
             digest = hashlib.sha256(data).hexdigest()
             existing = db.photo_by_hash(conn, digest)
             if existing:
+                if album is not None:
+                    db.file_if_unsorted(conn, digest, album)
                 duplicates += 1
                 results.append(dict(_photo_urls(existing), filename=f.filename,
                                     ok=True, duplicate=True, faces=0))
@@ -657,7 +670,8 @@ def api_upload(
             dest.write_bytes(data)
             if client is not None:
                 # indexed on the uploader's machine with our own models: store as is
-                pid = db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
+                pid = db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest,
+                                      album)
                 for face in client:
                     db.add_face(conn, pid, face["bbox"], face["det_score"], face["embedding"])
                 db.set_face_count(conn, pid, len(client))
@@ -668,7 +682,7 @@ def api_upload(
                 continue
             # Recorded now, with its hash, so a re-run is recognised as a
             # duplicate even before the background worker reaches it.
-            db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest)
+            db.upsert_photo(conn, str(dest), dest.stat().st_mtime, width, height, digest, album)
             # n_faces NULL marks "accepted, not yet indexed", so a restart
             # mid-queue can pick the work back up.
             conn.execute("UPDATE photos SET n_faces = NULL WHERE path = ?", (str(dest),))
@@ -773,6 +787,114 @@ def api_photos_delete(
     _storage_cache["at"] = -1e9
     index.refresh(force=True)
     return {"deleted": len(paths)}
+
+
+# --- albums ----------------------------------------------------------------------
+
+_ALBUM_GONE = "Thư mục này không còn trên máy chủ (có thể đã bị xoá). Hãy tải lại danh sách thư mục."
+
+
+class AlbumIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+def _album_name(raw: str) -> str:
+    name = " ".join(raw.split())  # no stray or doubled spaces in a chip label
+    if not name:
+        raise HTTPException(422, "Tên thư mục không được để trống.")
+    return name
+
+
+@app.get("/api/albums")
+def api_albums():
+    """The albums guests can browse, in order, with how many photos each holds."""
+    conn = db.connect()
+    try:
+        return {"albums": db.list_albums(conn), "unsorted": db.count_photos(conn, 0)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/albums", status_code=201)
+def api_album_create(body: AlbumIn, x_upload_token: str | None = Header(default=None)):
+    _require_upload_token(x_upload_token)
+    name = _album_name(body.name)
+    conn = db.connect()
+    try:
+        album = db.create_album(conn, name)
+    finally:
+        conn.close()
+    if album is None:
+        raise HTTPException(409, f"Đã có thư mục “{name}”.")
+    return album
+
+
+@app.put("/api/albums/order")
+def api_album_order(
+    ids: list[int] = Body(..., embed=True),
+    x_upload_token: str | None = Header(default=None),
+):
+    _require_upload_token(x_upload_token)
+    conn = db.connect()
+    try:
+        db.order_albums(conn, ids)
+        return {"albums": db.list_albums(conn)}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/albums/{album_id}")
+def api_album_rename(album_id: int, body: AlbumIn,
+                     x_upload_token: str | None = Header(default=None)):
+    _require_upload_token(x_upload_token)
+    name = _album_name(body.name)
+    conn = db.connect()
+    try:
+        outcome = db.rename_album(conn, album_id, name)
+        album = db.get_album(conn, album_id)
+    finally:
+        conn.close()
+    if outcome == "missing":
+        raise HTTPException(404, _ALBUM_GONE)
+    if outcome == "taken":
+        raise HTTPException(409, f"Đã có thư mục “{name}”.")
+    return album
+
+
+@app.delete("/api/albums/{album_id}")
+def api_album_delete(album_id: int, x_upload_token: str | None = Header(default=None)):
+    """Remove an album. Its photos are not deleted: they stay in "all photos"."""
+    _require_upload_token(x_upload_token)
+    conn = db.connect()
+    try:
+        held = db.delete_album(conn, album_id)
+    finally:
+        conn.close()
+    if held is None:
+        raise HTTPException(404, _ALBUM_GONE)
+    return {"deleted": album_id, "unsorted": held}
+
+
+@app.post("/api/photos/album")
+def api_photos_album(
+    ids: list[int] = Body(..., embed=True),
+    album: int | None = Body(None, embed=True),
+    x_upload_token: str | None = Header(default=None),
+):
+    """Move photos into an album, or out of every album when `album` is null."""
+    _require_upload_token(x_upload_token)
+    if not ids:
+        raise HTTPException(400, "Chưa chọn ảnh nào.")
+    if len(ids) > 500:
+        raise HTTPException(413, "Tối đa 500 ảnh mỗi lần.")
+    conn = db.connect()
+    try:
+        if album is not None and db.get_album(conn, album) is None:
+            raise HTTPException(404, _ALBUM_GONE)
+        moved = db.set_album(conn, ids, album)
+    finally:
+        conn.close()
+    return {"moved": moved}
 
 
 @app.post("/api/download-zip")

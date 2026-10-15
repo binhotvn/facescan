@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS faces (
     embedding BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
+CREATE TABLE IF NOT EXISTS albums (
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -69,7 +74,10 @@ def _migrate(conn: sqlite3.Connection):
     """
     have = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
     for col, decl in (("sha256", "TEXT"), ("claimed_by", "TEXT"), ("claimed_until", "REAL"),
-                      ("attempts", "INTEGER NOT NULL DEFAULT 0")):
+                      ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                      # a photo sits in at most one album; deleting the album
+                      # leaves its photos in the gallery, just unsorted
+                      ("album_id", "INTEGER REFERENCES albums(id) ON DELETE SET NULL")):
         if col not in have:
             try:
                 conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {decl}")
@@ -77,6 +85,7 @@ def _migrate(conn: sqlite3.Connection):
                 if "duplicate column" not in str(e):  # another process got there first
                     raise
     conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_sha ON photos(sha256)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_album ON photos(album_id)")
     conn.commit()
 
 
@@ -105,11 +114,15 @@ def photo_is_indexed(conn: sqlite3.Connection, path: str, mtime: float) -> bool:
 
 
 def upsert_photo(conn, path: str, mtime: float, width: int, height: int,
-                 sha256: str | None = None) -> int:
+                 sha256: str | None = None, album_id: int | None = None) -> int:
+    if album_id is None:
+        # re-indexing a photo must not pull it out of the album it was filed in
+        row = conn.execute("SELECT album_id FROM photos WHERE path = ?", (path,)).fetchone()
+        album_id = row[0] if row else None
     conn.execute("DELETE FROM photos WHERE path = ?", (path,))
     cur = conn.execute(
-        "INSERT INTO photos (path, mtime, width, height, sha256) VALUES (?, ?, ?, ?, ?)",
-        (path, mtime, width, height, sha256),
+        "INSERT INTO photos (path, mtime, width, height, sha256, album_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (path, mtime, width, height, sha256, album_id),
     )
     return cur.lastrowid
 
@@ -154,16 +167,32 @@ def pending_photos(conn):
     return [{"path": r[0], "sha256": r[1]} for r in rows]
 
 
-def list_photos(conn, limit: int = 120, offset: int = 0):
+def _album_filter(album: int | None) -> tuple[str, tuple]:
+    """WHERE clause for an album filter: None is every photo, 0 the unsorted ones."""
+    if album is None:
+        return "", ()
+    if album == 0:
+        return " WHERE album_id IS NULL", ()
+    return " WHERE album_id = ?", (album,)
+
+
+def list_photos(conn, limit: int = 120, offset: int = 0, album: int | None = None):
     """Newest-indexed first page of photos for the gallery view."""
+    where, args = _album_filter(album)
     rows = conn.execute(
-        "SELECT id, path, width, height, n_faces FROM photos ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        f"SELECT id, path, width, height, n_faces, album_id FROM photos{where}"
+        " ORDER BY id DESC LIMIT ? OFFSET ?",
+        (*args, limit, offset),
     ).fetchall()
     return [
-        {"id": r[0], "path": r[1], "w": r[2], "h": r[3], "n_faces": r[4]}
+        {"id": r[0], "path": r[1], "w": r[2], "h": r[3], "n_faces": r[4], "album": r[5]}
         for r in rows
     ]
+
+
+def count_photos(conn, album: int | None = None) -> int:
+    where, args = _album_filter(album)
+    return conn.execute(f"SELECT COUNT(*) FROM photos{where}", args).fetchone()[0]
 
 
 def delete_photos(conn, ids) -> list[str]:
@@ -175,6 +204,95 @@ def delete_photos(conn, ids) -> list[str]:
     paths = [r[0] for r in conn.execute(f"SELECT path FROM photos WHERE id IN ({marks})", ids)]
     conn.execute(f"DELETE FROM photos WHERE id IN ({marks})", ids)
     return paths
+
+
+# --- albums ----------------------------------------------------------------------
+# The folders guests browse by ("Lễ khai mạc", "Gala dinner"...). Every photo is
+# in "all photos"; an album is a filter over them, in the order the admin set.
+
+
+def list_albums(conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT a.id, a.name, COUNT(p.id) FROM albums a"
+        " LEFT JOIN photos p ON p.album_id = a.id"
+        " GROUP BY a.id ORDER BY a.position, a.id"
+    ).fetchall()
+    return [{"id": r[0], "name": r[1], "photos": r[2]} for r in rows]
+
+
+def get_album(conn, album_id: int) -> dict | None:
+    return next((a for a in list_albums(conn) if a["id"] == album_id), None)
+
+
+def _name_taken(conn, name: str, but: int | None = None) -> bool:
+    # case-insensitive for Vietnamese too, which SQLite's NOCASE is not
+    folded = name.casefold()
+    return any(r[1].casefold() == folded and r[0] != but
+               for r in conn.execute("SELECT id, name FROM albums"))
+
+
+def create_album(conn, name: str) -> dict | None:
+    """The new album, or None if one by that name already exists."""
+    if _name_taken(conn, name):
+        return None
+    cur = conn.execute(
+        "INSERT INTO albums (name, position)"
+        " VALUES (?, (SELECT COALESCE(MAX(position), 0) + 1 FROM albums))",
+        (name,),
+    )
+    conn.commit()
+    return {"id": cur.lastrowid, "name": name, "photos": 0}
+
+
+def rename_album(conn, album_id: int, name: str) -> str:
+    """'ok', 'missing' or 'taken'."""
+    if conn.execute("SELECT 1 FROM albums WHERE id = ?", (album_id,)).fetchone() is None:
+        return "missing"
+    if _name_taken(conn, name, but=album_id):
+        return "taken"
+    conn.execute("UPDATE albums SET name = ? WHERE id = ?", (name, album_id))
+    conn.commit()
+    return "ok"
+
+
+def delete_album(conn, album_id: int) -> int | None:
+    """Drop an album; its photos stay in the gallery. How many it held, None if no such album."""
+    if conn.execute("SELECT 1 FROM albums WHERE id = ?", (album_id,)).fetchone() is None:
+        return None
+    cur = conn.execute("UPDATE photos SET album_id = NULL WHERE album_id = ?", (album_id,))
+    conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+    conn.commit()
+    return cur.rowcount
+
+
+def order_albums(conn, ids) -> None:
+    """Put albums in this order; any not listed (made meanwhile) keep theirs, after."""
+    ids = [int(i) for i in ids]
+    rest = [r[0] for r in conn.execute("SELECT id FROM albums ORDER BY position, id")
+            if r[0] not in ids]
+    conn.executemany("UPDATE albums SET position = ? WHERE id = ?",
+                     [(n, i) for n, i in enumerate(ids + rest, start=1)])
+    conn.commit()
+
+
+def set_album(conn, photo_ids, album_id: int | None) -> int:
+    """Move photos into an album (None: out of any). How many were moved."""
+    ids = [int(i) for i in photo_ids]
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    cur = conn.execute(f"UPDATE photos SET album_id = ? WHERE id IN ({marks})", (album_id, *ids))
+    conn.commit()
+    return cur.rowcount
+
+
+def file_if_unsorted(conn, sha256: str, album_id: int) -> None:
+    """A photo sent again into an album joins it, unless it was already filed elsewhere."""
+    conn.execute(
+        "UPDATE photos SET album_id = ? WHERE sha256 = ? AND album_id IS NULL",
+        (album_id, sha256),
+    )
+    conn.commit()
 
 
 # --- the indexing queue -------------------------------------------------------

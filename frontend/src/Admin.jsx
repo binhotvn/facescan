@@ -1,5 +1,14 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Theme, Button, PasswordInput, InlineNotification, ProgressBar, Tag } from '@carbon/react';
+import {
+  Theme,
+  Button,
+  PasswordInput,
+  InlineNotification,
+  ProgressBar,
+  Select,
+  SelectItem,
+  Tag,
+} from '@carbon/react';
 import {
   CloudUpload,
   Download,
@@ -9,6 +18,7 @@ import {
   Renew,
 } from '@carbon/icons-react';
 
+import AdminAlbums from './components/AdminAlbums';
 import AdminPhotos from './components/AdminPhotos';
 import StorageCard from './components/StorageCard';
 import logo from './assets/vinhhung-logo.png';
@@ -32,13 +42,14 @@ const STATUS = {
   error: { label: 'Lỗi', type: 'red' },
 };
 
-const Row = memo(function Row({ item }) {
+const Row = memo(function Row({ item, album }) {
   const name = item.file.webkitRelativePath || item.file.name;
   return (
     <li>
       <span className="fa-admin__name" title={name}>
         {name}
       </span>
+      {album && <span className="fa-admin__album">{album}</span>}
       <span className="fa-admin__size">{formatBytes(item.file.size)}</span>
       <Tag size="sm" type={STATUS[item.status].type}>
         {STATUS[item.status].label}
@@ -78,10 +89,11 @@ async function checkToken(token) {
 }
 
 /** POST one batch with XHR, since fetch cannot report upload progress. */
-function sendBatch(files, token, onProgress) {
+function sendBatch(files, token, album, onProgress) {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     files.forEach((f) => form.append('files', f, f.name));
+    if (album != null) form.append('album', String(album));
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/upload');
     xhr.setRequestHeader('X-Upload-Token', token);
@@ -140,6 +152,7 @@ export default function Admin() {
   const [dragging, setDragging] = useState(false);
   const [stats, setStats] = useState(null);
   const [tab, setTab] = useState('upload');
+  const [uploadAlbum, setUploadAlbum] = useState(null); // where newly added photos go
   const [storage, setStorage] = useState(null);
   const progressFrame = useRef(0);
   const sentBytes = useRef(new Map()); // batch id -> bytes on the wire so far
@@ -237,7 +250,9 @@ export default function Admin() {
       for (const it of queue) {
         if (
           cur.length &&
-          (cur.length >= limits.max_batch || curBytes + it.file.size > MAX_BATCH_BYTES)
+          (cur.length >= limits.max_batch ||
+            curBytes + it.file.size > MAX_BATCH_BYTES ||
+            it.album !== cur[0].album) // one album per request
         ) {
           batches.push(cur);
           cur = [];
@@ -260,6 +275,7 @@ export default function Admin() {
             const data = await sendBatch(
               batch.map((it) => it.file),
               token,
+              batch[0].album,
               (frac) => {
                 sentBytes.current.set(key, frac * bytes);
                 showProgress();
@@ -278,7 +294,8 @@ export default function Admin() {
               }),
             );
           } catch (e) {
-            patch(ids, () => ({ status: 'error', error: e.message, retry: true }));
+            // 404: the album was deleted meanwhile, sending again would not help
+            patch(ids, () => ({ status: 'error', error: e.message, retry: e.status !== 404 }));
             if (e.status === 401 || e.status === 503) {
               stop = true;
               signOut(e.message);
@@ -307,6 +324,7 @@ export default function Admin() {
       return {
         id: nextId.current++,
         file,
+        album: uploadAlbum,
         status: tooBig ? 'error' : 'waiting',
         error: tooBig ? `Ảnh quá lớn (tối đa ${formatBytes(limits.max_photo_bytes)}).` : null,
         retry: false,
@@ -335,14 +353,24 @@ export default function Admin() {
     return c;
   }, [items]);
 
+  const albums = useMemo(() => stats?.albums ?? [], [stats]);
+  const unsorted = (stats?.photos ?? 0) - albums.reduce((n, a) => n + a.photos, 0);
+  const albumNames = useMemo(() => new Map(albums.map((a) => [a.id, a.name])), [albums]);
+
+  // the album picked for uploads was deleted (here, or by another admin)
+  useEffect(() => {
+    if (uploadAlbum != null && stats && !albumNames.has(uploadAlbum)) setUploadAlbum(null);
+  }, [uploadAlbum, stats, albumNames]);
+
   const list = useMemo(() => {
-    if (items.length <= LIST_LIMIT) return items.map((it) => <Row key={it.id} item={it} />);
+    const row = (it) => <Row key={it.id} item={it} album={albumNames.get(it.album)} />;
+    if (items.length <= LIST_LIMIT) return items.map(row);
     const failed = items.filter((it) => it.status === 'error');
     const rest = items
       .filter((it) => it.status !== 'error')
       .slice(0, Math.max(0, LIST_LIMIT - failed.length));
-    return [...failed, ...rest].map((it) => <Row key={it.id} item={it} />);
-  }, [items]);
+    return [...failed, ...rest].map(row);
+  }, [items, albumNames]);
   const retryable = items.some((it) => it.status === 'error' && it.retry);
 
   // The desktop uploader reads this file instead of having the token typed in.
@@ -462,15 +490,58 @@ export default function Admin() {
           >
             Quản lý ảnh
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'albums'}
+            className={`fa-chip${tab === 'albums' ? ' is-active' : ''}`}
+            onClick={() => setTab('albums')}
+          >
+            Thư mục{albums.length ? ` (${albums.length})` : ''}
+          </button>
         </div>
 
         <StorageCard storage={storage} />
 
         {tab === 'photos' && (
-          <AdminPhotos token={token} onUnauthorized={signOut} onChanged={refreshStats} />
+          <AdminPhotos
+            token={token}
+            albums={albums}
+            unsorted={unsorted}
+            onUnauthorized={signOut}
+            onChanged={refreshStats}
+          />
+        )}
+
+        {tab === 'albums' && (
+          <AdminAlbums
+            token={token}
+            albums={albums}
+            onChanged={refreshStats}
+            onUnauthorized={signOut}
+          />
         )}
 
         <div className="fa-admin__panel" hidden={tab !== 'upload'}>
+          <div className="fa-admin__target">
+            <Select
+              id="upload-album"
+              labelText="Tải vào thư mục"
+              value={uploadAlbum ?? ''}
+              onChange={(e) => setUploadAlbum(e.target.value ? Number(e.target.value) : null)}
+              helperText={
+                albums.length
+                  ? 'Áp dụng cho ảnh thêm vào từ giờ. Ảnh đang chờ giữ thư mục lúc được thêm.'
+                  : 'Chưa có thư mục nào: tạo ở tab Thư mục để khách lọc ảnh theo phần sự kiện.'
+              }
+            >
+              <SelectItem value="" text="Không vào thư mục nào (chỉ Tất cả ảnh)" />
+              {albums.map((a) => (
+                <SelectItem key={a.id} value={String(a.id)} text={a.name} />
+              ))}
+            </Select>
+          </div>
+
           <div
             className={`fa-drop${dragging ? ' is-over' : ''}`}
             onDragOver={(e) => {

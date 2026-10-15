@@ -74,3 +74,66 @@ def test_embeddings_are_stored_normalized(conn):
     assert meta[0]["path"] == "a.jpg"
     assert meta[0]["bbox"] == [1.0, 2.0, 3.0, 4.0]
     assert db.stats(conn) == {"photos": 1, "faces": 1}
+
+
+def test_albums_list_in_order_with_their_photo_counts(conn):
+    gala = db.create_album(conn, "Gala Dinner")
+    opening = db.create_album(conn, "Lễ Khai Mạc")
+    pid = db.upsert_photo(conn, "a.jpg", 1.0, 10, 10, album_id=gala["id"])
+    db.upsert_photo(conn, "b.jpg", 1.0, 10, 10)
+    conn.commit()
+
+    assert [(a["name"], a["photos"]) for a in db.list_albums(conn)] == [
+        ("Gala Dinner", 1), ("Lễ Khai Mạc", 0)]
+    assert [p["id"] for p in db.list_photos(conn, album=gala["id"])] == [pid]
+    assert db.count_photos(conn, 0) == 1  # 0: the photos in no album
+    assert db.count_photos(conn) == 2
+
+    db.order_albums(conn, [opening["id"]])  # the one not listed keeps its place, after
+    assert [a["name"] for a in db.list_albums(conn)] == ["Lễ Khai Mạc", "Gala Dinner"]
+
+
+def test_album_names_are_unique_ignoring_case(conn):
+    album = db.create_album(conn, "Lễ Trao Giải")
+    assert db.create_album(conn, "lễ trao giải") is None
+    other = db.create_album(conn, "Signature")
+    assert db.rename_album(conn, other["id"], "LỄ TRAO GIẢI") == "taken"
+    assert db.rename_album(conn, album["id"], "Lễ trao giải") == "ok"  # its own name, recased
+    assert db.rename_album(conn, 999, "x") == "missing"
+
+
+def test_deleting_an_album_keeps_its_photos(conn):
+    album = db.create_album(conn, "Behind The Scenes")
+    db.upsert_photo(conn, "a.jpg", 1.0, 10, 10, album_id=album["id"])
+    conn.commit()
+
+    assert db.delete_album(conn, album["id"]) == 1
+    assert db.list_albums(conn) == []
+    assert [p["album"] for p in db.list_photos(conn)] == [None]
+    assert db.delete_album(conn, album["id"]) is None
+
+
+def test_reindexing_a_photo_keeps_its_album(conn):
+    album = db.create_album(conn, "Best Gross")
+    db.upsert_photo(conn, "a.jpg", 1.0, 10, 10, album_id=album["id"])
+    db.upsert_photo(conn, "a.jpg", 2.0, 10, 10)  # what ingest --force does
+    conn.commit()
+    assert db.list_photos(conn)[0]["album"] == album["id"]
+
+
+def test_older_database_gains_albums(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE photos (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,"
+                " mtime REAL NOT NULL, width INTEGER, height INTEGER, n_faces INTEGER DEFAULT 0)")
+    old.execute("INSERT INTO photos (path, mtime) VALUES ('a.jpg', 1.0)")
+    old.commit()
+    old.close()
+
+    conn = db.connect(path)
+    album = db.create_album(conn, "Gala Dinner")
+    assert db.set_album(conn, [1], album["id"]) == 1
+    assert db.list_albums(conn)[0]["photos"] == 1
+    conn.close()

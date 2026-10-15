@@ -464,6 +464,112 @@ def test_upload_names_do_not_collide(client, upload_ready):
     assert len(list(upload_ready.iterdir())) == 2  # both kept, distinct names
 
 
+
+# --- albums -----------------------------------------------------------------
+
+
+def _album(client, name, token="s3cret"):
+    return client.post("/api/albums", json={"name": name}, headers={"X-Upload-Token": token})
+
+
+def test_albums_are_made_by_admins_and_listed_for_everyone(client, upload_ready):
+    assert _album(client, "Gala Dinner", token="nope").status_code == 401
+    r = _album(client, "  Lễ   Khai Mạc ")
+    assert r.status_code == 201
+    assert r.json()["name"] == "Lễ Khai Mạc"  # tidied for the chip label
+    assert _album(client, "lễ khai mạc").status_code == 409
+    assert _album(client, "   ").status_code == 422
+
+    body = client.get("/api/albums").json()
+    assert [a["name"] for a in body["albums"]] == ["Lễ Khai Mạc"]
+    assert client.get("/api/stats").json()["albums"] == body["albums"]
+
+
+def test_upload_into_an_album_and_browse_it(client, upload_ready):
+    gala = _album(client, "Gala Dinner").json()
+    jpegs = _distinct_jpegs(3)
+    r = client.post("/api/upload", data={"album": str(gala["id"])},
+                    files=[("files", ("a.jpg", jpegs[0], "image/jpeg")),
+                           ("files", ("b.jpg", jpegs[1], "image/jpeg"))],
+                    headers={"X-Upload-Token": "s3cret"})
+    assert r.json()["accepted"] == 2
+    _upload(client, [("files", ("c.jpg", jpegs[2], "image/jpeg"))])  # no album
+
+    in_gala = client.get(f"/api/photos?album={gala['id']}").json()
+    assert in_gala["total"] == 2
+    assert {p["album"] for p in in_gala["photos"]} == {gala["id"]}
+    assert client.get("/api/photos?album=0").json()["total"] == 1
+    assert client.get("/api/photos").json()["total"] == 3
+    assert client.get("/api/albums").json() == {
+        "albums": [dict(gala, photos=2)], "unsorted": 1}
+
+
+def test_upload_into_a_deleted_album_is_refused_before_storing(client, upload_ready):
+    gone = _album(client, "Signature").json()
+    client.delete(f"/api/albums/{gone['id']}", headers={"X-Upload-Token": "s3cret"})
+    r = client.post("/api/upload", data={"album": str(gone["id"])},
+                    files=[("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))],
+                    headers={"X-Upload-Token": "s3cret"})
+    assert r.status_code == 404
+    assert client.get("/api/photos").json()["total"] == 0
+
+
+def test_resending_an_unsorted_photo_into_an_album_files_it(client, upload_ready):
+    a, b = (_album(client, n).json() for n in ("Best Gross", "Gala Dinner"))
+    photo = ("files", ("a.jpg", _jpeg_bytes(), "image/jpeg"))
+    _upload(client, [photo])
+
+    def send_into(album):
+        return client.post("/api/upload", data={"album": str(album["id"])}, files=[photo],
+                           headers={"X-Upload-Token": "s3cret"}).json()
+
+    assert send_into(a)["duplicates"] == 1
+    assert client.get(f"/api/photos?album={a['id']}").json()["total"] == 1
+    send_into(b)  # already filed: a duplicate does not move it
+    assert client.get(f"/api/photos?album={a['id']}").json()["total"] == 1
+
+
+def test_rename_reorder_and_delete_albums(client, upload_ready):
+    h = {"X-Upload-Token": "s3cret"}
+    a, b, c = (_album(client, n).json() for n in ("Best Gross", "Signature", "Gala"))
+    _upload(client, [("files", ("x.jpg", _jpeg_bytes(), "image/jpeg"))])
+    pid = client.get("/api/photos").json()["photos"][0]["id"]
+    assert client.post("/api/photos/album", json={"ids": [pid], "album": c["id"]},
+                       headers=h).json() == {"moved": 1}
+
+    r = client.patch(f"/api/albums/{c['id']}", json={"name": "Gala Dinner"}, headers=h)
+    assert r.json() == {"id": c["id"], "name": "Gala Dinner", "photos": 1}
+    assert client.patch(f"/api/albums/{a['id']}", json={"name": "gala dinner"},
+                        headers=h).status_code == 409
+    assert client.patch("/api/albums/999", json={"name": "x"}, headers=h).status_code == 404
+
+    order = client.put("/api/albums/order", json={"ids": [c["id"], a["id"], b["id"]]},
+                       headers=h).json()
+    assert [x["name"] for x in order["albums"]] == ["Gala Dinner", "Best Gross", "Signature"]
+
+    assert client.delete(f"/api/albums/{c['id']}", headers=h).json() == {
+        "deleted": c["id"], "unsorted": 1}
+    assert client.get("/api/photos").json()["total"] == 1  # the photo is still there
+    assert client.delete(f"/api/albums/{c['id']}", headers=h).status_code == 404
+
+
+def test_moving_photos_between_albums(client, upload_ready):
+    h = {"X-Upload-Token": "s3cret"}
+    album = _album(client, "Best Gross").json()
+    _upload(client, [("files", (f"{i}.jpg", d, "image/jpeg"))
+                     for i, d in enumerate(_distinct_jpegs(2))])
+    ids = [p["id"] for p in client.get("/api/photos").json()["photos"]]
+
+    assert client.post("/api/photos/album", json={"ids": ids, "album": album["id"]}).status_code == 401
+    assert client.post("/api/photos/album", json={"ids": ids, "album": 999},
+                       headers=h).status_code == 404
+    assert client.post("/api/photos/album", json={"ids": ids, "album": album["id"]},
+                       headers=h).json()["moved"] == 2
+    assert client.post("/api/photos/album", json={"ids": ids[:1], "album": None},
+                       headers=h).json()["moved"] == 1
+    assert client.get("/api/albums").json()["unsorted"] == 1
+
+
 def test_download_zip_bundles_the_photos(client, photos_dir):
     paths = []
     for name in ("a.jpg", "b.jpg"):
