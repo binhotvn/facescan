@@ -225,6 +225,23 @@ body,
     font-variant-numeric: tabular-nums;
   }
 
+  &__album {
+    max-inline-size: 12rem;
+    padding: 0.125rem 0.5rem;
+    overflow: hidden;
+    border-radius: 4px;
+    background: $brand-soft;
+    color: $brand;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__target {
+    max-inline-size: 28rem;
+  }
+
   &__error {
     flex-basis: 100%;
     color: #da1e28;
@@ -461,6 +478,114 @@ body,
   &__more {
     justify-self: center;
   }
+
+  &__views.fa-chips {
+    justify-content: flex-start;
+
+    .fa-chip {
+      padding: 0.375rem 0.75rem;
+      font-size: 0.8125rem;
+    }
+  }
+
+  &__bar .cds--select {
+    inline-size: auto;
+  }
+}
+
+// --- albums (admin) ----------------------------------------------------------
+.fa-albums {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(22, 22, 22, 0.08);
+  animation: fa-rise var(--dur) var(--ease-out) both;
+
+  &__new {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+
+    .cds--form-item {
+      flex: 1;
+    }
+
+    @media (max-width: 36rem) {
+      flex-direction: column;
+      align-items: stretch;
+
+      .cds--btn {
+        max-inline-size: none;
+      }
+    }
+  }
+
+  &__list {
+    border-block-start: 1px solid #e8e8ea;
+
+    li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-block-size: 3.25rem;
+      padding-block: 0.375rem;
+      border-block-end: 1px solid #f0f0f2;
+    }
+  }
+
+  &__order {
+    display: flex;
+  }
+
+  &__name {
+    display: grid;
+    flex: 1;
+    min-inline-size: 0;
+
+    strong {
+      overflow: hidden;
+      color: $brand;
+      font-family: $display;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    span {
+      color: #6f6f6f;
+      font-size: 0.8125rem;
+    }
+  }
+
+  &__rename {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 0.25rem;
+    min-inline-size: 0;
+
+    .cds--form-item {
+      flex: 1;
+    }
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  &__empty,
+  &__hint {
+    color: #6f6f6f;
+    font-size: 0.875rem;
+  }
+
+  &__empty {
+    padding-block: 1.5rem;
+    text-align: center;
+  }
 }
 
 .fa-drop {
@@ -625,6 +750,11 @@ body,
     border: 1px solid #c9cadb;
     border-radius: 14px;
     box-shadow: 0 10px 32px rgba(35, 35, 97, 0.16);
+
+    // one fact: a card sized for it, not a wide empty bar
+    &:has(> :only-child) {
+      inline-size: min(100%, 22rem);
+    }
   }
 }
 
@@ -696,10 +826,11 @@ body,
 }
 
 // --- content ---------------------------------------------------------------
+// photos are the page: on a wide monitor they get the width, not a strip in the middle
 .fa-main {
-  max-inline-size: 84rem;
+  max-inline-size: 120rem;
   margin-inline: auto;
-  padding: clamp(2.5rem, 4vw, 4rem) 1.5rem 5rem;
+  padding: clamp(2.5rem, 4vw, 4rem) clamp(1.5rem, 3vw, 3rem) 5rem;
 }
 
 .fa-page {
@@ -779,6 +910,8 @@ body,
   align-items: center;
   gap: 0.5rem;
   justify-content: center;
+  // the chips own the gap below them: what follows (count, empty state, notice) may not be there
+  margin-block-end: 1.5rem;
   padding-block-end: 0;
   border-block-end: 0;
 }
@@ -809,10 +942,48 @@ body,
     border-color: $brand;
     color: #fff;
   }
+
+  &__count {
+    margin-inline-start: 0.25rem;
+    font-weight: 400;
+    opacity: 0.7;
+  }
+}
+
+// a long row of albums scrolls sideways on phones rather than stacking four deep
+@media (max-width: 42rem) {
+  .fa-main > .fa-chips {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    margin-inline: -1.5rem;
+    padding-inline: 1.5rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-padding-inline: 1.5rem;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+
+    .fa-chip {
+      flex: none;
+    }
+
+    // a scroller drops its end padding; this keeps the last chip off the edge
+    > :last-child {
+      margin-inline-end: 1rem;
+    }
+  }
+}
+
+.fa-zip {
+  display: flex;
+  justify-content: center;
+  margin-block-end: 1.5rem;
 }
 
 .fa-count {
-  margin-block: 1rem 1.5rem;
+  margin-block: 0 1.5rem;
   text-align: center;
   font-size: 0.9375rem;
   color: $ink-muted;
@@ -827,7 +998,7 @@ body,
   align-items: center;
   gap: 0.5rem;
   inline-size: 100%;
-  margin-block-start: 1rem;
+  margin-block-end: 1.5rem;
   padding: 0.75rem 1rem;
   border: 0;
   border-radius: $radius;
@@ -960,6 +1131,9 @@ body,
   display: grid;
   justify-items: center;
   gap: 0.5rem;
+  // a few lines of text: a card their size, not one stretched across a wide screen
+  max-inline-size: 48rem;
+  margin-inline: auto;
   padding: clamp(3rem, 6vw, 5rem) 2rem;
   text-align: center;
   background: #fff;
@@ -989,6 +1163,25 @@ body,
     max-inline-size: 26rem;
     color: $ink-muted;
   }
+
+  &__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-block-start: 0.75rem;
+
+    .fa-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+  }
+}
+
+// errors sit under the centred chips like everything else, not hard left
+.fa-main > .cds--inline-notification {
+  margin-inline: auto;
 }
 
 .fa-grid {

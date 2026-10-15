@@ -60,7 +60,8 @@ export default function JustifiedGrid({ photos, onOpen, onLoadMore, hasMore }) {
     return () => io.disconnect();
   }, [hasMore, photos.length]);
 
-  const targetHeight = width < 700 ? 150 : 240;
+  // taller rows on wide screens, or each photo shrinks to a stamp in a long row
+  const targetHeight = width < 700 ? 150 : width < 1600 ? 240 : 300;
   // carry the original index: the rows hold copies, so indexOf would not find them
   const sized = useMemo(
     () => photos.map((p, i) => ({ ...p, index: i, ratio: p.w && p.h ? p.w / p.h : 1.5 })),
