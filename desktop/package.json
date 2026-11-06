@@ -1,7 +1,7 @@
 {
   "name": "kapok-uploader",
   "productName": "Kapok Uploader",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Tải ảnh sự kiện lên máy chủ FaceScan",
   "private": true,
   "main": "electron/main.cjs",
@@ -11,7 +11,7 @@
     "test": "node --test electron/*.test.cjs",
     "e2e": "vite build && node scripts/e2e.mjs",
     "dist:mac": "vite build && electron-builder --mac --publish never",
-    "dist:win": "vite build && electron-builder --win portable --publish never"
+    "dist:win": "vite build && electron-builder --win portable --x64 --publish never"
   },
   "build": {
     "appId": "vn.kapok.uploader",

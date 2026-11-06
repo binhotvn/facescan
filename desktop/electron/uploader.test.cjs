@@ -348,6 +348,13 @@ test('connection files: admin-page format, hand-written keys, BOM; bad ones expl
   }
 });
 
+test('connection JSON: what is exported reads back the same', () => {
+  const text = U.serverFile({ url: ' https://ff.example.com/ ', token: ' abc ', event: 'Gala' });
+  assert.deepEqual(JSON.parse(text), { url: 'https://ff.example.com', token: 'abc', event: 'Gala' });
+  assert.deepEqual(U.readServerFile(text), { url: 'https://ff.example.com', token: 'abc', event: 'Gala' });
+  assert.equal(JSON.parse(U.serverFile({ url: 'https://x', token: 't' })).event, undefined, 'no event: left out');
+});
+
 test('server errors read in Vietnamese', () => {
   assert.equal(U.describeError(new U.HttpError(401)), 'Sai mã tải lên.');
   assert.match(U.describeError({ cause: { code: 'ECONNREFUSED' } }), /từ chối kết nối/);
@@ -405,6 +412,88 @@ test('the faces field reaches the server as multipart form data', async () => {
     await U.postBatch(`http://127.0.0.1:${server.address().port}`, 't', items);
     const part = body.split('name="faces"\r\n\r\n')[1].split('\r\n')[0];
     assert.deepEqual(JSON.parse(part), [{ signature: 'sig', faces: [{ bbox: [1, 2, 3, 4] }] }]);
+  } finally {
+    server.close();
+  }
+});
+
+test('sorting: lists server photos with full thumbnail URLs, files them 500 at a time', async () => {
+  const moves = [];
+  const deletes = [];
+  const queries = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const reply = (status, body) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      if (req.headers['x-upload-token'] !== 't') return reply(401, { detail: 'Sai mã tải lên.' });
+      const u = new URL(req.url, 'http://x');
+      if (u.pathname === '/api/photos') {
+        queries.push(Object.fromEntries(u.searchParams));
+        return reply(200, {
+          total: 2,
+          photos: [
+            { id: 7, path: '/data/uploads/20261015-101500-0a1b2c3d-IMG_0007.jpg', thumb: '/photo?path=a&size=sm', album: 3, faces: 4 },
+            { id: 6, path: '/data/photos/old.jpg', thumb: '/photo?path=b&size=sm', album: null, faces: null },
+          ],
+        });
+      }
+      if (u.pathname.startsWith('/api/albums/')) {
+        const id = Number(u.pathname.split('/').pop());
+        if (id === 99) return reply(404, { detail: 'Thư mục này không còn trên máy chủ.' });
+        if (req.method === 'DELETE') return reply(200, { deleted: id, unsorted: 3 });
+        const { name } = JSON.parse(Buffer.concat(chunks).toString());
+        if (name === 'Gala') return reply(409, { detail: 'Đã có thư mục “Gala”.' });
+        return reply(200, { id, name, photos: 3 });
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      if (u.pathname === '/api/photos/delete') {
+        deletes.push(body.ids.length);
+        return reply(200, { deleted: body.ids.length });
+      }
+      if (body.album === 99) return reply(404, { detail: 'Thư mục này không còn trên máy chủ.' });
+      moves.push(body);
+      return reply(200, { moved: body.ids.length });
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  try {
+    const page = await U.listPhotos(url, 't', { album: 0, offset: 300, limit: 300 });
+    assert.deepEqual(queries[0], { limit: '300', offset: '300', album: '0' });
+    assert.equal(page.total, 2);
+    assert.deepEqual(page.photos[0], {
+      id: 7,
+      name: 'IMG_0007.jpg',
+      thumb: `${url.slice(0, -1)}/photo?path=a&size=sm`,
+      album: 3,
+      faces: 4,
+    });
+    assert.equal(page.photos[1].name, 'old.jpg');
+
+    await U.listPhotos(url, 't');
+    assert.equal(queries[1].album, undefined, 'no album: every photo');
+
+    const ids = Array.from({ length: 1201 }, (_, i) => i + 1);
+    assert.equal(await U.movePhotos(url, 't', ids, 5), 1201);
+    assert.deepEqual(moves.map((m) => [m.ids.length, m.album]), [[500, 5], [500, 5], [201, 5]]);
+
+    await U.movePhotos(url, 't', [1], null);
+    assert.equal(moves.at(-1).album, null, 'null takes photos out of every album');
+
+    await assert.rejects(U.movePhotos(url, 't', [1], 99), (e) => e.fromServer && /không còn/.test(e.message));
+    await assert.rejects(U.movePhotos(url, 'bad', [1], 5), (e) => e instanceof U.HttpError && e.status === 401);
+
+    assert.equal(await U.deletePhotos(url, 't', ids), 1201);
+    assert.deepEqual(deletes, [500, 500, 201], 'deleted in batches the server takes');
+
+    assert.deepEqual(await U.renameAlbum(url, 't', 5, 'Tiệc tối'), { id: 5, name: 'Tiệc tối', photos: 3 });
+    await assert.rejects(U.renameAlbum(url, 't', 5, 'Gala'), (e) => e.fromServer && /Đã có/.test(e.message));
+    assert.deepEqual(await U.deleteAlbum(url, 't', 5), { deleted: 5, unsorted: 3 });
+    await assert.rejects(U.deleteAlbum(url, 't', 99), (e) => e.fromServer && /không còn/.test(e.message));
   } finally {
     server.close();
   }

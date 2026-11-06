@@ -816,17 +816,79 @@ async function fetchServer(base, token) {
       throw e;
     });
   const [storage, albums] = await Promise.all([optional('/api/admin/storage'), optional('/api/albums')]);
-  return { limits, stats, storage, albums: albums?.albums ?? null };
+  return { limits, stats, storage, albums: albums?.albums ?? null, unsorted: albums?.unsorted ?? null };
+}
+
+/** The server's own words when it has some (a name taken, an album gone), else the usual. */
+async function withDetail(call) {
+  try {
+    return await call();
+  } catch (e) {
+    const own = e instanceof HttpError && typeof e.detail === 'string' && e.detail;
+    if (own && e.status !== 401 && e.status !== 503) throw Object.assign(new Error(e.detail), { fromServer: true });
+    throw e;
+  }
 }
 
 /** Make an album on the server; it answers with {id, name, photos}. */
-async function createAlbum(base, token, name) {
-  try {
-    return await apiGet(base, '/api/albums', token, 15_000, { method: 'POST', body: { name } });
-  } catch (e) {
-    if (e instanceof HttpError && e.detail) throw new Error(e.detail); // e.g. the name is taken
-    throw e;
-  }
+function createAlbum(base, token, name) {
+  return withDetail(() => apiGet(base, '/api/albums', token, 15_000, { method: 'POST', body: { name } }));
+}
+
+/**
+ * A page of the photos already on the server, newest first: all of them, the
+ * ones in no album (`album` 0) or one album's. Thumbnails come back as full URLs.
+ */
+async function listPhotos(base, token, { album = null, offset = 0, limit = 300 } = {}) {
+  const only = album == null ? '' : `&album=${album}`;
+  const page = await apiGet(base, `/api/photos?limit=${limit}&offset=${offset}${only}`, token);
+  const root = base.replace(/\/+$/, '');
+  return {
+    total: page.total,
+    photos: page.photos.map((p) => ({
+      id: p.id,
+      name: path.basename(p.path).replace(/^\d{8}-\d{6}-[0-9a-f]{8}-/, ''), // drop the upload stamp
+      thumb: root + p.thumb,
+      album: p.album ?? null,
+      faces: p.faces ?? null,
+    })),
+  };
+}
+
+const MOVE_BATCH = 500; // the server's cap per call
+
+/** File photos into an album (null: into none). How many the server moved. */
+function movePhotos(base, token, ids, album) {
+  return withDetail(async () => {
+    let moved = 0;
+    for (let i = 0; i < ids.length; i += MOVE_BATCH) {
+      const body = { ids: ids.slice(i, i + MOVE_BATCH), album };
+      moved += (await apiGet(base, '/api/photos/album', token, 30_000, { method: 'POST', body })).moved;
+    }
+    return moved;
+  });
+}
+
+/** Rename an album; the server answers with {id, name, photos}. */
+function renameAlbum(base, token, id, name) {
+  return withDetail(() => apiGet(base, `/api/albums/${id}`, token, 15_000, { method: 'PATCH', body: { name } }));
+}
+
+/** Remove an album. Its photos stay on the server, in no album. */
+function deleteAlbum(base, token, id) {
+  return withDetail(() => apiGet(base, `/api/albums/${id}`, token, 15_000, { method: 'DELETE' }));
+}
+
+/** Take photos off the server for good. How many the server deleted. */
+function deletePhotos(base, token, ids) {
+  return withDetail(async () => {
+    let deleted = 0;
+    for (let i = 0; i < ids.length; i += MOVE_BATCH) {
+      const body = { ids: ids.slice(i, i + MOVE_BATCH) };
+      deleted += (await apiGet(base, '/api/photos/delete', token, 60_000, { method: 'POST', body })).deleted;
+    }
+    return deleted;
+  });
 }
 
 /** A connection file from the admin page: {"url": ..., "token": ...}. */
@@ -849,6 +911,13 @@ function readServerFile(text) {
   return out;
 }
 
+/** The same file the admin page hands out, to pass a connection on to another machine. */
+function serverFile({ url, token, event }) {
+  const out = { url: String(url || '').trim().replace(/\/+$/, ''), token: String(token || '').trim() };
+  if (event) out.event = String(event);
+  return `${JSON.stringify(out, null, 2)}\n`;
+}
+
 module.exports = {
   IMAGE_EXTS,
   STATE_NAME,
@@ -868,6 +937,12 @@ module.exports = {
   scanFolder,
   fetchServer,
   createAlbum,
+  renameAlbum,
+  deleteAlbum,
+  listPhotos,
+  movePhotos,
+  deletePhotos,
   describeError,
   readServerFile,
+  serverFile,
 };

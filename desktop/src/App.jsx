@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Logo from './Logo.jsx';
+import Sorter from './Sorter.jsx';
 import Viewer from './Viewer.jsx';
 
 const api = window.kapok;
@@ -162,6 +163,7 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [tiles, setTiles] = useState([]);
   const [filter, setFilter] = useState('all');
+  const [pane, setPane] = useState('recent'); // 'recent': sent from here, 'sort': all on the server
   const [viewing, setViewing] = useState(null); // id of the tile open in the viewer
   const [logs, setLogs] = useState([]);
   const [logOpen, setLogOpen] = useState(false);
@@ -266,6 +268,11 @@ export default function App() {
     else flash('Kéo một thư mục ảnh vào đây.', 'err');
   };
 
+  // album ids come back once deleted: a new album must not inherit this one's folder
+  const forgetAlbum = (album) => {
+    if (folders[album]) assign(album, null);
+  };
+
   const createAlbum = async (e) => {
     e.preventDefault();
     const name = newAlbum.trim();
@@ -327,8 +334,8 @@ export default function App() {
     return () => clearInterval(id);
   }, [server, editing, url, token, connect]);
 
-  const importConfig = useCallback(async (file) => {
-    const r = await api.importConfig(file);
+  /** A connection read from JSON (a file, the clipboard, a paste): use it. */
+  const applyConfig = useCallback((r) => {
     if (!r) return;
     if (!r.ok) {
       flash(r.error, 'err');
@@ -339,6 +346,19 @@ export default function App() {
     flash('Đã nhập cấu hình máy chủ', 'ok');
     connect(r.url, r.token);
   }, [connect, flash]);
+  const importConfig = useCallback(async (file) => applyConfig(await api.importConfig(file)), [applyConfig]);
+  const pasteConfig = async (text) => applyConfig(await api.pasteConfig(text));
+
+  // the connection in use, to hand on to another machine
+  const shareable = () => ({ url: url.trim(), token: token.trim(), event: server?.stats?.event?.name });
+  const copyConfig = async () => {
+    await api.copyConfig(shareable());
+    flash('Đã sao chép JSON cấu hình. Dán vào Kapok Uploader ở máy khác.', 'ok');
+  };
+  const exportConfig = async () => {
+    const r = await api.exportConfig(shareable());
+    if (r) flash(r.ok ? `Đã lưu ${r.file}` : r.error, r.ok ? 'ok' : 'err');
+  };
 
   // -- events from the engine
   useEffect(() => api.onEvent((ev) => {
@@ -436,7 +456,23 @@ export default function App() {
     [shown]
   );
   const flashError = useCallback((text) => flash(text, 'err'), [flash]);
+  const refreshServer = useCallback(() => connect(url, token, true), [connect, url, token]);
   const errors = logs.filter((l) => l.level === 'error').length;
+
+  // sorting needs albums on the server and a working connection
+  const sorting = pane === 'sort' && Boolean(server && albums) && !editing;
+  const modes = albums ? (
+    <div className="modes" role="tablist" aria-label="Ảnh">
+      <button type="button" role="tab" aria-selected={!sorting} onClick={() => setPane('recent')}>
+        Ảnh vừa tải lên
+      </button>
+      <button type="button" role="tab" aria-selected={sorting} disabled={editing} onClick={() => setPane('sort')}>
+        Phân loại ảnh
+      </button>
+    </div>
+  ) : (
+    <h2>Ảnh vừa tải lên</h2>
+  );
 
   const s = stats;
   const progress = s && s.queued ? Math.min(1, s.done / s.queued) : 0;
@@ -511,6 +547,15 @@ export default function App() {
                     Mở thư viện
                   </button>
                 )}
+                <p className="server-json">
+                  <span>Cấu hình JSON (có mã tải lên):</span>
+                  <button type="button" className="btn btn--link" onClick={copyConfig}>
+                    Sao chép
+                  </button>
+                  <button type="button" className="btn btn--link" onClick={exportConfig}>
+                    Lưu file…
+                  </button>
+                </p>
               </div>
             ) : (
               <form
@@ -522,7 +567,17 @@ export default function App() {
               >
                 <label>
                   <span>Địa chỉ máy chủ</span>
-                  <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://anh.sukien.vn" />
+                  <input
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData('text').trim();
+                      if (!text.startsWith('{')) return; // a plain address
+                      e.preventDefault();
+                      pasteConfig(text);
+                    }}
+                    placeholder="https://anh.sukien.vn"
+                  />
                 </label>
                 <label>
                   <span>Mã tải lên</span>
@@ -543,13 +598,19 @@ export default function App() {
                   <button type="submit" className="btn btn--dark" disabled={connecting}>
                     {connecting ? 'Đang kết nối…' : 'Kết nối'}
                   </button>
+                  <button type="button" className="btn" onClick={() => pasteConfig()}>
+                    Dán JSON
+                  </button>
                   {server && (
                     <button type="button" className="btn btn--link" onClick={() => setEditing(false)}>
                       Huỷ
                     </button>
                   )}
                 </div>
-                <p className="hint">Hoặc kéo file kapok-uploader.json (tải ở trang quản trị) vào cửa sổ này.</p>
+                <p className="hint">
+                  Hoặc kéo file kapok-uploader.json (tải ở trang quản trị) vào cửa sổ này, hay sao chép nội dung JSON rồi
+                  bấm Dán JSON.
+                </p>
               </form>
             )}
           </Card>
@@ -811,64 +872,80 @@ export default function App() {
 
         {/* ------------------------------------------------ right: 7 parts */}
         <div className="col col--right">
-          <Card
-            className="gallery"
-            title="Ảnh vừa tải lên"
-            action={
-              <div className="segmented segmented--inline">
-                {[
-                  ['all', 'Tất cả'],
-                  ['uploaded', 'Đã gửi'],
-                  ['duplicate', 'Đã có'],
-                  ['failed', 'Lỗi'],
-                ].map(([k, label]) => (
-                  <button
-                    key={k}
-                    type="button"
-                    className={`${filter === k ? 'is-on' : ''}${k === 'failed' && counts.failed ? ' is-err' : ''}`}
-                    onClick={() => setFilter(k)}
-                  >
-                    {label} <b>{num(counts[k])}</b>
-                  </button>
-                ))}
-              </div>
-            }
-          >
-            {shown.length ? (
-              <div className="tiles">
-                {shown.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    className="tile"
-                    title={`${t.name}${t.error ? ` · ${t.error}` : ''}\nBấm để xem ảnh và khuôn mặt`}
-                    onClick={() => setViewing(t.id)}
-                  >
-                    {t.thumb ? <img src={t.thumb} alt="" draggable={false} /> : <span className="tile__none">Không xem trước được</span>}
-                    <span className={`badge is-${STATUS[t.status].tone}`}>{STATUS[t.status].label}</span>
-                    {t.faces != null && t.status !== 'failed' && (
-                      <span className="faces" title="Khuôn mặt nhận diện trên máy này">
-                        {t.faces} mặt
-                      </span>
-                    )}
-                    <span className="tile__name">
-                      {t.album && <b>{t.album} · </b>}
-                      {t.name}
-                    </span>
-                  </button>
-                ))}
-              </div>
+          <section className="card gallery">
+            {sorting ? (
+              <Sorter
+                modes={modes}
+                url={url.trim()}
+                token={token.trim()}
+                albums={albums}
+                unsorted={server.unsorted}
+                total={server.stats.photos}
+                onChanged={refreshServer}
+                onAlbumGone={forgetAlbum}
+                locked={running}
+                flash={flash}
+              />
             ) : (
-              <div className="empty">
-                <strong>{tiles.length ? 'Không có ảnh nào ở mục này' : 'Ảnh tải lên sẽ hiện ở đây'}</strong>
-                <span>
-                  {tiles.length
-                    ? 'Chọn mục khác ở phía trên.'
-                    : 'Chọn thư mục ảnh rồi bấm Bắt đầu tải lên. Ảnh mới chép vào thư mục sẽ tự được gửi.'}
-                </span>
-              </div>
+              <>
+                <header className="card__head">
+                  {modes}
+                  <div className="segmented segmented--inline">
+                    {[
+                      ['all', 'Tất cả'],
+                      ['uploaded', 'Đã gửi'],
+                      ['duplicate', 'Đã có'],
+                      ['failed', 'Lỗi'],
+                    ].map(([k, label]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        className={`${filter === k ? 'is-on' : ''}${k === 'failed' && counts.failed ? ' is-err' : ''}`}
+                        onClick={() => setFilter(k)}
+                      >
+                        {label} <b>{num(counts[k])}</b>
+                      </button>
+                    ))}
+                  </div>
+                </header>
+                {shown.length ? (
+                  <div className="tiles">
+                    {shown.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className="tile"
+                        title={`${t.name}${t.error ? ` · ${t.error}` : ''}\nBấm để xem ảnh và khuôn mặt`}
+                        onClick={() => setViewing(t.id)}
+                      >
+                        {t.thumb ? <img src={t.thumb} alt="" draggable={false} /> : <span className="tile__none">Không xem trước được</span>}
+                        <span className={`badge is-${STATUS[t.status].tone}`}>{STATUS[t.status].label}</span>
+                        {t.faces != null && t.status !== 'failed' && (
+                          <span className="faces" title="Khuôn mặt nhận diện trên máy này">
+                            {t.faces} mặt
+                          </span>
+                        )}
+                        <span className="tile__name">
+                          {t.album && <b>{t.album} · </b>}
+                          {t.name}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty">
+                    <strong>{tiles.length ? 'Không có ảnh nào ở mục này' : 'Ảnh tải lên sẽ hiện ở đây'}</strong>
+                    <span>
+                      {tiles.length
+                        ? 'Chọn mục khác ở phía trên.'
+                        : 'Chọn thư mục ảnh rồi bấm Bắt đầu tải lên. Ảnh mới chép vào thư mục sẽ tự được gửi.'}
+                      {!tiles.length && albums && ' Ảnh đã có trên máy chủ được chọn và chuyển thư mục ở tab Phân loại ảnh.'}
+                    </span>
+                  </div>
+                )}
+              </>
             )}
-          </Card>
+          </section>
 
           <section className={`log${logOpen ? ' is-open' : ''}`}>
             <button type="button" className="log__head" onClick={() => setLogOpen((v) => !v)}>
