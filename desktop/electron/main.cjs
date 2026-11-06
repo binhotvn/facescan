@@ -1,6 +1,6 @@
 'use strict';
 /** Kapok Uploader: Electron main process. The window is src/, the engine uploader.cjs. */
-const { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, powerSaveBlocker, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -166,12 +166,46 @@ ipcMain.handle('config:import', async (_e, file) => {
     if (r.canceled || !r.filePaths[0]) return null;
     file = r.filePaths[0];
   }
+  return takeServerFile(() => fs.readFileSync(file, 'utf8'));
+});
+
+/** Take a connection from JSON text: the clipboard's, or what was pasted. */
+ipcMain.handle('config:paste', (_e, text) =>
+  takeServerFile(() => {
+    const t = (text ?? clipboard.readText()).trim();
+    if (!t) throw new Error('Bộ nhớ tạm đang trống. Hãy sao chép nội dung file cấu hình JSON trước.');
+    return t;
+  })
+);
+
+function takeServerFile(read) {
   try {
-    const conf = U.readServerFile(fs.readFileSync(file, 'utf8'));
+    const conf = U.readServerFile(read());
     saveConfig({ url: conf.url, token: conf.token });
     return { ok: true, ...conf };
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+}
+
+/** Hand the connection on: onto the clipboard, or into a file like the admin page's. */
+ipcMain.handle('config:copy', (_e, conf) => {
+  clipboard.writeText(U.serverFile(conf));
+  return true;
+});
+
+ipcMain.handle('config:export', async (_e, conf) => {
+  const r = await dialog.showSaveDialog(win, {
+    title: 'Lưu file cấu hình máy chủ',
+    defaultPath: path.join(app.getPath('downloads'), 'kapok-uploader.json'),
+    filters: [{ name: 'Cấu hình Kapok', extensions: ['json'] }],
+  });
+  if (r.canceled || !r.filePath) return null;
+  try {
+    fs.writeFileSync(r.filePath, U.serverFile(conf));
+    return { ok: true, file: r.filePath };
+  } catch (e) {
+    return { ok: false, error: `Không lưu được file (${e.message}).` };
   }
 });
 
@@ -205,11 +239,58 @@ ipcMain.handle('server:fetch', async (_e, url, token) => {
   }
 });
 
+const why = (e) => (e.fromServer ? e.message : U.describeError(e));
+
 ipcMain.handle('album:create', async (_e, url, token, name) => {
   try {
     return { ok: true, album: await U.createAlbum(url, token, name) };
   } catch (e) {
-    return { ok: false, error: e instanceof U.HttpError ? U.describeError(e) : e.message };
+    return { ok: false, error: why(e) };
+  }
+});
+
+// -- sorting the photos already on the server into albums ------------------
+ipcMain.handle('photos:list', async (_e, url, token, query) => {
+  try {
+    return { ok: true, ...(await U.listPhotos(url, token, query)) };
+  } catch (e) {
+    return { ok: false, error: why(e) };
+  }
+});
+
+ipcMain.handle('photos:move', async (_e, url, token, ids, album) => {
+  if (!Array.isArray(ids) || !ids.every(Number.isInteger)) return { ok: false, error: 'Danh sách ảnh không hợp lệ.' };
+  try {
+    return { ok: true, moved: await U.movePhotos(url, token, ids, album ?? null) };
+  } catch (e) {
+    return { ok: false, error: why(e) };
+  }
+});
+
+ipcMain.handle('photos:delete', async (_e, url, token, ids) => {
+  if (!Array.isArray(ids) || !ids.every(Number.isInteger)) return { ok: false, error: 'Danh sách ảnh không hợp lệ.' };
+  try {
+    return { ok: true, deleted: await U.deletePhotos(url, token, ids) };
+  } catch (e) {
+    return { ok: false, error: why(e) };
+  }
+});
+
+ipcMain.handle('album:rename', async (_e, url, token, id, name) => {
+  if (!Number.isInteger(id)) return { ok: false, error: 'Thư mục không hợp lệ.' };
+  try {
+    return { ok: true, album: await U.renameAlbum(url, token, id, name) };
+  } catch (e) {
+    return { ok: false, error: why(e) };
+  }
+});
+
+ipcMain.handle('album:delete', async (_e, url, token, id) => {
+  if (!Number.isInteger(id)) return { ok: false, error: 'Thư mục không hợp lệ.' };
+  try {
+    return { ok: true, ...(await U.deleteAlbum(url, token, id)) };
+  } catch (e) {
+    return { ok: false, error: why(e) };
   }
 });
 

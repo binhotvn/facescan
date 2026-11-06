@@ -316,6 +316,7 @@ input {
 
 .server-ok {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--ds-space-150);
@@ -335,6 +336,20 @@ input {
   span {
     font: var(--ds-font-body-small);
     color: var(--ds-text-subtle);
+  }
+}
+
+/* hand the connection on: a line of its own under the server */
+.server-json {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: var(--ds-space-150);
+  font: var(--ds-font-body-small);
+
+  .btn--link {
+    font: var(--ds-font-body-small);
+    font-weight: var(--ds-font-weight-medium);
   }
 }
 
@@ -945,6 +960,190 @@ input {
     max-width: 400px;
     color: var(--ds-text-subtle);
   }
+}
+
+/* --- sorting the server's photos into albums ----------------------------------- */
+.gallery .card__head {
+  align-items: flex-end;
+}
+
+/* what the gallery shows: ADS segmented control */
+.modes {
+  display: flex;
+  flex: none;
+  gap: var(--ds-space-025);
+  margin-bottom: var(--ds-space-075);
+  padding: var(--ds-space-025);
+  border-radius: var(--ds-radius-large);
+  background: var(--ds-background-neutral);
+
+  button {
+    height: 28px;
+    padding: 0 var(--ds-space-150);
+    border: 0;
+    border-radius: var(--ds-radius-small);
+    background: none;
+    color: var(--ds-text-subtle);
+    font-weight: var(--ds-font-weight-semibold);
+
+    &:hover:not(:disabled) {
+      color: var(--ds-text);
+    }
+
+    &[aria-selected='true'] {
+      background: var(--ds-surface-raised);
+      color: var(--ds-text);
+      box-shadow: var(--ds-shadow-raised);
+    }
+
+    &:disabled {
+      color: var(--ds-text-disabled);
+      cursor: not-allowed;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--ds-border-focused);
+    }
+  }
+}
+
+/* many albums scroll sideways rather than stacking rows of tabs */
+.sorter__views {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.sortbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--ds-space-100);
+  min-height: 44px;
+  padding: var(--ds-space-075) var(--ds-space-300);
+  border-bottom: var(--ds-border-width) solid var(--ds-border);
+  background: var(--ds-surface);
+  font: var(--ds-font-body-small);
+  color: var(--ds-text-subtle);
+
+  strong {
+    color: var(--ds-text);
+  }
+}
+
+.sortbar__text {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--ds-space-150);
+  min-width: 0;
+}
+
+.tiles.is-loading {
+  opacity: 0.6;
+}
+
+.tiles__more {
+  grid-column: 1 / -1;
+  justify-self: center;
+}
+
+/* a photo to pick: the check sits where the status badge sits on sent photos */
+.pick {
+  cursor: default;
+
+  &.is-on {
+    background: var(--ds-background-selected);
+    box-shadow: inset 0 0 0 2px var(--ds-border-selected);
+
+    &:hover {
+      background: var(--ds-background-selected-hovered);
+    }
+
+    img {
+      transform: scale(0.92);
+    }
+  }
+
+  img {
+    transition: transform 0.12s ease;
+  }
+}
+
+.pick__check {
+  position: absolute;
+  top: var(--ds-space-150);
+  left: var(--ds-space-150);
+  width: 22px;
+  height: 22px;
+  border: 2px solid #fff; /* over a photo: white in both themes */
+  border-radius: var(--ds-radius-full);
+  background: var(--ds-blanket);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+
+  .pick:hover &,
+  .pick:focus-visible &,
+  .is-picking & {
+    opacity: 1;
+  }
+
+  .pick.is-on & {
+    border-color: var(--ds-background-selected-bold);
+    background: var(--ds-background-selected-bold);
+    opacity: 1;
+
+    &::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      left: 6px;
+      width: 5px;
+      height: 10px;
+      border: solid var(--ds-icon-inverse);
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+  }
+}
+
+/* what to do with the picked photos: ADS action bar */
+.movebar {
+  display: flex;
+  flex: none;
+  margin-top: auto; /* at the bottom even when a few photos leave room */
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ds-space-100);
+  padding: var(--ds-space-150) var(--ds-space-300);
+  border-top: var(--ds-border-width) solid var(--ds-border);
+  background: var(--ds-surface-overlay);
+  box-shadow: var(--ds-shadow-overlay);
+}
+
+.movebar__label {
+  margin-right: var(--ds-space-050);
+  font-weight: var(--ds-font-weight-semibold);
+}
+
+.movebar__new {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-100);
+
+  input {
+    width: 220px;
+    height: 24px;
+    padding: 0 var(--ds-space-100);
+  }
+}
+
+.movebar__out {
+  margin-left: auto;
 }
 
 /* --- log ------------------------------------------------------------------------ */

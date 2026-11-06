@@ -275,6 +275,17 @@ Nothing to install, no Python. Tag `desktop-v1.2.3` to publish a release.
   row with a folder on this machine (plus one for photos in no album); **+ Thư
   mục mới** makes an album and asks for its folder. A mapped folder inside
   another is left to its own album. Remembered per server.
+- **Phân loại ảnh:** a second tab over the gallery shows every photo already
+  on the server, by album. Click to pick, Shift+click for a run, drag across
+  many, ⌘/Ctrl+A for all shown; the bar at the bottom files them into an
+  album, a new one, or out of every album. The last move can be undone.
+  Picked photos can also be deleted from the server (Xoá ảnh or the Delete
+  key, after a confirm), and the album on show renamed or deleted; its photos
+  then go back to no album.
+- **Cấu hình JSON:** once connected, Sao chép copies `{url, token, event}` and
+  Lưu file… saves it as `kapok-uploader.json` (the admin page's format), to set
+  up another machine. Dán JSON, or pasting JSON into the address box, connects
+  from it. It carries the upload token.
 - Shares `upload.py`'s state file, so a folder sent from either is not re-sent.
 
 Unsigned builds show one warning on first open (macOS: right-click → Open;
